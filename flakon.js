@@ -5,6 +5,7 @@ import { Schwappmodell, DT, qVonWinkel, qMal, winkelableitung } from './schwappe
 import { ladeHDR } from './hdr.js';
 import { baueAussehen } from './aussehen.js';
 import { ENV_DREHUNG_Y } from './glas.js';
+import { baueGlaettung } from './glaettung.js';
 
 const canvas = document.querySelector('canvas');
 const status = document.querySelector('#status');
@@ -15,7 +16,11 @@ let winkelX = 0, winkelZ = 0, gier = 0, zielX = 0, zielZ = 0, federX = 0, federZ
 let gehalten = false, ziehen = false, geste = '', letzteX = 0, letzteY = 0, startX = 0, startY = 0;
 let gierTempo = 0, gierSchwung = 0, letzteZeit = 0, letzteBewegung = 0;
 let qAlt = [0, 0, 0, 1], omegaAlt = [0, 0, 0], gerechnet = 0;
-let pixelDichte = 1, qualitaetReduziert = false;
+let pixelDichte = 1, dichteAbzug = 0, sparstufe = 0, ausgabe = null;
+// Zoom der Kamera (1 bis 3): ein Ausschnitt des vollen Bildes; zoomX/zoomY = linke obere Ecke des Ausschnitts (0..1)
+let zoom = 1, zoomX = 0, zoomY = 0;
+const finger = new Map();
+let pinch = null, tippZeit = 0, tippX = 0, tippY = 0, druckZeit = 0, druckWeg = 0;
 let bereitAufloesen, bereitAblehnen;
 const bereit = new Promise((l, a) => { bereitAufloesen = l; bereitAblehnen = a; });
 
@@ -45,9 +50,9 @@ const kontroller = {
   gerechneteZeit: () => gerechnet,
   backend: () => renderer.backend.isWebGPUBackend === true ? 'webgpu' : 'webgl',
   gierGrad: () => gier * 180 / Math.PI,
-  halteLage(gx, gz) {
+  halteLage(gx, gz, g = 0) {
     gehalten = true; ziehen = false;
-    winkelX = gx * Math.PI / 180; winkelZ = gz * Math.PI / 180; gier = 0;
+    winkelX = gx * Math.PI / 180; winkelZ = gz * Math.PI / 180; gier = g * Math.PI / 180;
     federX = federZ = gierSchwung = gierTempo = 0;
     qAlt = qAktuell(); omegaAlt = [0, 0, 0];
     modell.setzeLage(qAlt);
@@ -80,6 +85,9 @@ const kontroller = {
   oberflaecheY: xz => modell.oberflaecheY(xz),
   neigungGrad: () => Math.hypot(winkelX, winkelZ) * 180 / Math.PI,
   zeigeFluessigkeit(an) { aussehen.glas.uFluessig.value = an ? 1 : 0; },
+  zeigeEtikett(an) { aussehen.etikett.visible = !!an; aussehen.glas.uEtikett.value = an ? 1 : 0; },
+  zoom: () => zoom,
+  setzeZoom(z, fx = 0.5, fy = 0.5) { setzeZoom(z, fx, fy, fx, fy); },
   loslassen() {
     gehalten = false;
     zielX = zielZ = 0;
@@ -87,27 +95,71 @@ const kontroller = {
   },
 };
 
+/** Zoom z um die Bildstelle (bx, by) des vollen Bildes, die an der Fensterstelle (fx, fy) liegen soll (alles 0..1). */
+function setzeZoom(z, bx, by, fx, fy) {
+  zoom = THREE.MathUtils.clamp(z, 1, 3);
+  const teil = 1 / zoom;
+  zoomX = THREE.MathUtils.clamp(bx - fx * teil, 0, 1 - teil);
+  zoomY = THREE.MathUtils.clamp(by - fy * teil, 0, 1 - teil);
+  sichtfeld();
+}
+
+function sichtfeld() {
+  const w = Math.max(1, canvas.clientWidth), h = Math.max(1, canvas.clientHeight);
+  if (zoom > 1.0005) kamera.setViewOffset(w, h, zoomX * w, zoomY * h, w / zoom, h / zoom);
+  else { kamera.clearViewOffset(); kamera.aspect = w / h; }
+  kamera.updateProjectionMatrix();
+}
+
 function resize() {
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  const grenze = Math.sqrt(2.1e6 / Math.max(1, w * h));
-  pixelDichte = Math.min(devicePixelRatio || 1, 2, grenze) * 0.999;
+  const w = Math.max(1, canvas.clientWidth), h = Math.max(1, canvas.clientHeight);
+  // Zoomt der Nutzer die ganze Seite, wird entsprechend feiner gezeichnet — innerhalb der Pixelgrenze (§6.4, §6.8)
+  const seitenzoom = Math.max(1, window.visualViewport ? visualViewport.scale : 1);
+  const grenze = Math.sqrt(2.1e6 / (w * h));
+  const hoechst = Math.min(Math.min(devicePixelRatio || 1, 2) * seitenzoom, grenze) * 0.999;
+  pixelDichte = Math.max(Math.min(1, hoechst), hoechst - dichteAbzug);
   renderer.setPixelRatio(pixelDichte);
   renderer.setSize(w, h, false);
-  kamera.aspect = w / h;
-  kamera.updateProjectionMatrix();
+  sichtfeld();
+}
+
+function fensterStelle(e) {
+  const r = canvas.getBoundingClientRect();
+  return [(e.clientX - r.left) / Math.max(1, r.width), (e.clientY - r.top) / Math.max(1, r.height)];
+}
+
+function pinchStart() {
+  const [a, b] = [...finger.values()];
+  const [fx, fy] = fensterStelle({ clientX: (a.x + b.x) / 2, clientY: (a.y + b.y) / 2 });
+  pinch = { abstand: Math.max(10, Math.hypot(a.x - b.x, a.y - b.y)), zoom, bx: zoomX + fx / zoom, by: zoomY + fy / zoom };
+  // Zwei Finger zoomen nur: laufende Dreh- oder Kippgeste beenden, die Flasche federt zurück
+  geste = 'zoom'; zielX = zielZ = 0; gierTempo = 0;
 }
 
 function zeiger() {
   canvas.addEventListener('pointerdown', e => {
+    finger.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* Zeiger schon weg */ }
+    if (finger.size === 2) { ziehen = true; pinchStart(); return; }
+    if (finger.size > 2) return;
+    druckZeit = performance.now(); druckWeg = 0;
+    startX = letzteX = e.clientX; startY = letzteY = e.clientY;
     if (gehalten) return;
     ziehen = true; geste = '';
-    startX = letzteX = e.clientX; startY = letzteY = e.clientY;
     letzteZeit = letzteBewegung = performance.now();
     gierTempo = gierSchwung = 0;
-    canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener('pointermove', e => {
-    if (!ziehen || gehalten) return;
+    const f = finger.get(e.pointerId);
+    if (f) { f.x = e.clientX; f.y = e.clientY; }
+    if (pinch && finger.size >= 2) {
+      const [a, b] = [...finger.values()];
+      const [fx, fy] = fensterStelle({ clientX: (a.x + b.x) / 2, clientY: (a.y + b.y) / 2 });
+      setzeZoom(pinch.zoom * Math.hypot(a.x - b.x, a.y - b.y) / pinch.abstand, pinch.bx, pinch.by, fx, fy);
+      return;
+    }
+    druckWeg = Math.max(druckWeg, Math.hypot(e.clientX - startX, e.clientY - startY));
+    if (!ziehen || gehalten || geste === 'zoom') return;
     const jetzt = performance.now(), dx = e.clientX - letzteX, dy = e.clientY - letzteY;
     if (!geste && Math.hypot(e.clientX - startX, e.clientY - startY) >= 12) {
       geste = Math.abs(e.clientX - startX) > 1.5 * Math.abs(e.clientY - startY) ? 'drehen' : 'kippen';
@@ -124,7 +176,24 @@ function zeiger() {
     }
     letzteX = e.clientX; letzteY = e.clientY; letzteZeit = jetzt;
   });
-  const ende = () => {
+  const ende = e => {
+    const dabei = finger.delete(e.pointerId);
+    if (pinch) {
+      // Nach dem Zoomen erst alle Finger heben, dann beginnt eine neue Geste
+      if (finger.size < 2) pinch = null;
+      if (finger.size === 0) ziehen = false;
+      zielX = zielZ = 0;
+      return;
+    }
+    if (geste === 'zoom') { if (finger.size === 0) ziehen = false; return; }
+    // Doppeltipp / Doppelklick: Zoom zurück auf 1
+    const jetzt = performance.now();
+    if (dabei && e.type === 'pointerup' && druckWeg < 10 && jetzt - druckZeit < 300) {
+      if (jetzt - tippZeit < 400 && Math.hypot(e.clientX - tippX, e.clientY - tippY) < 40) {
+        setzeZoom(1, 0.5, 0.5, 0.5, 0.5);
+        tippZeit = 0;
+      } else { tippZeit = jetzt; tippX = e.clientX; tippY = e.clientY; }
+    }
     if (!ziehen) return;
     ziehen = false;
     if (geste === 'drehen' && performance.now() - letzteBewegung < 150) {
@@ -134,19 +203,41 @@ function zeiger() {
   };
   canvas.addEventListener('pointerup', ende);
   canvas.addEventListener('pointercancel', ende);
+  // Strg + Mausrad und Trackpad-Pinch (meldet Chrome als Rad mit Strg) zoomen die Kamera, nicht die Seite
+  canvas.addEventListener('wheel', e => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const [fx, fy] = fensterStelle(e);
+    const schritt = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    setzeZoom(zoom * Math.exp(-schritt * 0.01), zoomX + fx / zoom, zoomY + fy / zoom, fx, fy);
+  }, { passive: false });
   addEventListener('resize', resize);
+  if (window.visualViewport) visualViewport.addEventListener('resize', resize);
 }
 
+// Selbstanpassung (§6.4): erst die Auflösung stufenweise bis Pixel-Dichte 1, dann die teuren Wirkungen:
+// Stufe 1 Bläschen und Marschschritte, Stufe 2 Oberflächenstruktur und Nebenstrahlen des Glases, Stufe 3 Nachglättung.
 function fpsAnpassen(schnitt) {
   if (schnitt >= 45) return;
   if (pixelDichte > 1.01) {
-    pixelDichte = Math.max(1, pixelDichte - 0.2);
-    renderer.setPixelRatio(pixelDichte);
-  } else if (!qualitaetReduziert) {
-    qualitaetReduziert = true;
+    dichteAbzug += 0.2;
+    resize();
+  } else if (sparstufe === 0) {
+    sparstufe = 1;
     aussehen.blasen.visible = false;
     aussehen.glas.uSchritte.value = 16;   // gröbere Brechung: weniger Marschschritte je Strahl
+  } else if (sparstufe === 1) {
+    sparstufe = 2;
+    aussehen.glas.uFein.value = 0;
+  } else if (sparstufe === 2) {
+    sparstufe = 3;
+    ausgabe = null;                       // ohne Nachglättung direkt zeichnen (MSAA bleibt)
   }
+}
+
+function zeichne() {
+  if (ausgabe) ausgabe.render();
+  else renderer.render(szene, kamera);
 }
 
 async function main() {
@@ -197,7 +288,8 @@ async function main() {
   zeiger();
   resize();
   qAlt = qAktuell();
-  renderer.render(szene, kamera);
+  ausgabe = baueGlaettung(renderer, szene, kamera);
+  zeichne();
   if (status) status.textContent = `${(tabelle.bezug / 1000).toFixed(1).replace('.', ',')} ml · ${modell.f1.toFixed(2).replace('.', ',')} Hz · 240 Schritte/s`;
   if (lade) lade.hidden = true;
   document.documentElement.dataset.flakon = 'bereit';
@@ -235,7 +327,7 @@ async function main() {
       fpsStart = jetzt; fpsBilder = 0;
     }
     aktualisiere();
-    renderer.render(szene, kamera);
+    zeichne();
     requestAnimationFrame(bild);
   }
   requestAnimationFrame(bild);

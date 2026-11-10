@@ -35,18 +35,24 @@ export class Teller {
       return vec2(xw.div(0.18).add(0.5), zw.div(0.18).add(0.5));   // Zeile 0 der Datei (oben) = −z
     });
     /** Gebackenes Tellerlicht an einer Weltstelle (x, z) — auch für Strahlen aus dem Glas-Shader. */
-    this.lichtWelt = (xw, zw) => {
-      const u = vec2(xw.div(0.18).add(0.5), zw.div(0.18).add(0.5));
-      return mix(this.a.sample(u), this.b.sample(u), this.uMisch).rgb.mul(this.uGain);
+    // Die Bilder sind 8-Bit und tonwertbegrenzt: das gebündelte, gefärbte Licht (Kaustik) ist in Wahrheit viel
+    // heller als der Teller ringsum. Warme, gesättigte Stellen werden deshalb wieder angehoben (uWarm).
+    this.uWarm = uniform(2.2);
+    const gebackenAn = u => {
+      const c = mix(this.a.sample(u), this.b.sample(u), this.uMisch).rgb;
+      return c.mul(c.r.sub(c.b).mul(3).clamp(0, 1).mul(this.uWarm).add(1));
     };
+    this.lichtWelt = (xw, zw) => gebackenAn(vec2(xw.div(0.18).add(0.5), zw.div(0.18).add(0.5))).mul(this.uGain);
     const licht = Fn(() => {
       const u = bildUV();
-      const gebacken = mix(this.a.sample(u), this.b.sample(u), this.uMisch).rgb;
-      // Ersatz beim Kippen: Kegel des Spots (von hinten rechts oben) und weicher Schatten des Flakons
-      const x = positionLocal.x, z = positionLocal.z;
+      const gebacken = gebackenAn(u);
+      // Ersatz beim Kippen, weltfest wie die gebackenen Bilder: Kegel des Spots (von hinten rechts oben), weicher
+      // Schatten des Flakons und darin klein der warme Fleck des Lichts, das durch die Flüssigkeit fällt
+      const x = u.x.sub(0.5).mul(0.18), z = u.y.sub(0.5).mul(0.18);
       const kegel = smoothstep(0.105, 0.02, vec2(x.sub(0.03), z.add(0.035)).length()).mul(0.16).add(0.02);
       const schatten = float(1).sub(smoothstep(0.045, 0.022, vec2(x.add(0.012), z.sub(0.02).mul(0.75)).length()).mul(0.7));
-      const ersatz = vec3(kegel.mul(schatten));
+      const warm = smoothstep(0.02, 0.003, vec2(x.add(0.018), z.sub(0.046)).length()).mul(0.22);
+      const ersatz = vec3(kegel.mul(schatten)).add(vec3(1.0, 0.48, 0.10).mul(warm));
       return mix(ersatz, gebacken, this.uKlar);
     });
     // Kornstruktur über eine ebene Abbildung (das Tellernetz hat keine UVs)
@@ -98,14 +104,14 @@ function baueBoden(szene) {
 export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDaten, hdr) {
   const d = meta.dateien, basis = './aussehen/';
   const namen = ['glas_normal', 'glas_rauheit', 'etikett', 'etikett_hoehe', 'etikett_maske',
-    'verschluss_normal', 'verschluss_rauheit', 'teller', 'teller_normal'];
+    'verschluss_normal', 'verschluss_rauheit', 'teller'];
   const tex = {};
   await Promise.all(namen.map(async n => {
-    tex[n] = await bild(basis + d[n], ['etikett', 'teller'].includes(n), ['teller', 'teller_normal'].includes(n));
+    tex[n] = await bild(basis + d[n], ['etikett', 'teller'].includes(n), n === 'teller');
   }));
   const lichtbilder = await Promise.all(d.teller_licht.map(n => bild(basis + n, true, false)));
 
-  let teller;
+  let teller, etikett;
   gltf.scene.traverse(ob => {
     if (ob.isMesh && !['glas', 'etikett', 'verschluss'].some(n => ob.name.toLowerCase().includes(n))) {
       teller = new Teller(ob, lichtbilder, tex.teller);
@@ -127,6 +133,7 @@ export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDate
       m.roughnessNode = float(0.58).sub(druck.mul(0.3));
       m.side = THREE.DoubleSide;
       ob.material = m;
+      etikett = ob;
     } else if (name.includes('verschluss')) {
       ob.material = new THREE.MeshPhysicalNodeMaterial({ color: 0xb4b4b8, metalness: 1,
         roughness: 0.25, normalMap: tex.verschluss_normal,
@@ -175,5 +182,5 @@ export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDate
   blasen.renderOrder = 4;
   blasen.frustumCulled = false;
   gruppe.add(blasen);
-  return { glas, glasMesh, blasen, teller, uBlasen };
+  return { glas, glasMesh, blasen, teller, uBlasen, etikett };
 }
