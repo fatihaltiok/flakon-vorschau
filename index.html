@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>FORTY-TWO DREAMS</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./stil.css">
+  <script type="importmap">
+    {"imports":{"three":"./lib/three.webgpu.js","three/tsl":"./lib/three.tsl.js"}}
+  </script>
+</head>
+<body class="beispiel">
+  <header class="kopf">
+    <img src="./42-zeichen.svg" alt="">
+    <h1>FORTY-TWO DREAMS</h1>
+    <p>FÜR IHN</p>
+  </header>
+  <main>
+    <section class="buhne" aria-label="Interaktiver Flakon">
+      <canvas aria-label="Drehbarer und kippbarer Flakon"></canvas>
+      <div id="lade" aria-label="3D-Ansicht wird geladen"></div>
+      <p id="fehler" hidden></p>
+    </section>
+    <p class="bedienhinweis">Wischen: drehen · Ziehen: kippen</p>
+  </main>
+  <section class="standbild">
+    <img src="./standbild_luxcore.png" alt="FORTY-TWO DREAMS">
+    <p>Gerendert mit LuxCore</p>
+  </section>
+  <footer>Beispielseite · 3D-Probe</footer>
+  <script type="module" src="./flakon.js"></script>
+</body>
+</html>

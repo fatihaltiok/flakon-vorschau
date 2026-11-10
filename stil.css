@@ -1,0 +1,46 @@
+@font-face { font-family: BigShoulders; src: url('./BigShouldersDisplay-700.ttf') format('truetype'); font-weight: 700; }
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #11181b; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; overflow: hidden; }
+main, canvas { width: 100vw; height: 100vh; display: block; }
+canvas { touch-action: none; cursor: grab; }
+canvas:active { cursor: grabbing; }
+.hinweis {
+  position: fixed; left: 20px; bottom: 20px; display: grid; gap: 5px;
+  padding: 12px 16px; border: 1px solid #ffffff20; border-radius: 8px;
+  color: #d6e2e5; background: #11181bcc; font-size: 13px; pointer-events: none;
+}
+.hinweis strong { color: #e5b86d; font-size: 15px; }
+#status { color: #91a4a9; }
+.regler {
+  position: fixed; right: 20px; top: 16px; display: grid; gap: 8px;
+  padding: 10px 14px; border: 1px solid #ffffff20; border-radius: 8px;
+  color: #d6e2e5; background: #11181bcc; font-size: 13px;
+}
+.regler label { display: grid; grid-template-columns: 80px 120px; align-items: center; gap: 8px; }
+
+.beispiel { overflow-y: auto; background: #100b10; color: #f0e8df; }
+.beispiel main { width: 100%; height: auto; }
+.kopf { min-height: 118px; display: grid; place-items: center; align-content: center; gap: 7px; padding: 18px 20px 14px; }
+.kopf img { width: 44px; height: 44px; }
+.kopf h1 { margin: 0; color: #f2b84b; font: 700 30px/1 BigShoulders, sans-serif; letter-spacing: .13em; text-align: center; }
+.kopf p { margin: 0; color: #b8a99f; font-size: 10px; letter-spacing: .28em; }
+.buhne { position: relative; width: min(100%, 600px); height: min(54vh, 650px); margin: 0 auto; overflow: hidden; }
+.buhne canvas { width: 100%; height: 100%; }
+.bedienhinweis { margin: 10px 16px 22px; color: #a99a91; font-size: 12px; letter-spacing: .04em; text-align: center; }
+#lade { position: absolute; inset: 50% auto auto 50%; width: 30px; height: 30px; margin: -15px;
+  border: 1px solid #f2b84b30; border-top-color: #f2b84b; border-radius: 50%; animation: drehen 1s linear infinite; }
+@keyframes drehen { to { transform: rotate(360deg); } }
+#fehler { position: absolute; inset: 45% 20px auto; margin: 0; color: #f2b84b; text-align: center; }
+.standbild { padding: 30px 20px 50px; background: #170c12; text-align: center; }
+.standbild img { display: block; width: min(78vw, 390px); height: auto; margin: 0 auto 18px; border-radius: 2px; }
+.standbild p { margin: 0; color: #b9a8a0; font-size: 11px; letter-spacing: .13em; }
+.beispiel footer { padding: 28px 20px 42px; color: #75666c; font-size: 11px; letter-spacing: .1em; text-align: center; }
+@media (min-width: 800px) {
+  .kopf { min-height: 178px; padding: 28px 20px 22px; }
+  .kopf img { width: 54px; height: 54px; }
+  .kopf h1 { font-size: 38px; }
+  .buhne { height: min(62vh, 650px); }
+  .standbild { padding: 48px 20px 58px; }
+}
