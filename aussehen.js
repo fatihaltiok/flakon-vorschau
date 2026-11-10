@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { Fn, cameraPosition, float, frontFacing, mix, normalLocal, normalWorld, pmremTexture,
   positionLocal, positionWorld, select, smoothstep, texture, uniform, uv, vec2, vec3 } from 'three/tsl';
 import { Glas, envRichtung } from './glas.js';
+import { EchtzeitLicht } from './tellerlicht.js';
 
 async function bild(url, farbe = false, flipY = true) {
   const t = await new THREE.TextureLoader().loadAsync(url);
@@ -42,7 +43,16 @@ export class Teller {
       const c = mix(this.a.sample(u), this.b.sample(u), this.uMisch).rgb;
       return c.mul(c.r.sub(c.b).mul(3).clamp(0, 1).mul(this.uWarm).add(1));
     };
-    this.lichtWelt = (xw, zw) => gebackenAn(vec2(xw.div(0.18).add(0.5), zw.div(0.18).add(0.5))).mul(this.uGain);
+    // Echtzeit-Licht (tellerlicht.js, nur WebGPU): ersetzt die Bilder, solange uEcht 1 ist. Es rechnet in
+    // Flaschenkoordinaten und gilt auch gekippt — kein Überblenden zwischen Lagen, kein Ersatz beim Kippen.
+    this.uEcht = uniform(0);
+    this.echt = null;   // wird vor dem ersten Bild gesetzt (baueAussehen), die Shader entstehen erst danach
+    this.lichtWelt = (xw, zw) => {
+      const alt = gebackenAn(vec2(xw.div(0.18).add(0.5), zw.div(0.18).add(0.5)));
+      if (!this.echt) return alt.mul(this.uGain);
+      const c = this.uGier.cos(), s = this.uGier.sin();   // Welt → Flasche (nur die Drehung)
+      return mix(alt, this.echt.lichtLokal(xw.mul(c).sub(zw.mul(s)), xw.mul(s).add(zw.mul(c))), this.uEcht).mul(this.uGain);
+    };
     const licht = Fn(() => {
       const u = bildUV();
       const gebacken = gebackenAn(u);
@@ -53,7 +63,9 @@ export class Teller {
       const schatten = float(1).sub(smoothstep(0.045, 0.022, vec2(x.add(0.012), z.sub(0.02).mul(0.75)).length()).mul(0.7));
       const warm = smoothstep(0.02, 0.003, vec2(x.add(0.018), z.sub(0.046)).length()).mul(0.22);
       const ersatz = vec3(kegel.mul(schatten)).add(vec3(1.0, 0.48, 0.10).mul(warm));
-      return mix(ersatz, gebacken, this.uKlar);
+      const bilder = mix(ersatz, gebacken, this.uKlar);
+      if (!this.echt) return bilder;
+      return mix(bilder, this.echt.lichtLokal(positionLocal.x, positionLocal.z), this.uEcht);
     });
     // Kornstruktur über eine ebene Abbildung (das Tellernetz hat keine UVs)
     const p = mesh.geometry.attributes.position, werte = new Float32Array(p.count * 2);
@@ -101,7 +113,7 @@ function baueBoden(szene) {
   return boden;
 }
 
-export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDaten, hdr) {
+export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDaten, hdr, opt = {}) {
   const d = meta.dateien, basis = './aussehen/';
   const namen = ['glas_normal', 'glas_rauheit', 'etikett', 'etikett_hoehe', 'etikett_maske',
     'verschluss_normal', 'verschluss_rauheit', 'teller'];
@@ -111,7 +123,7 @@ export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDate
   }));
   const lichtbilder = await Promise.all(d.teller_licht.map(n => bild(basis + n, true, false)));
 
-  let teller, etikett;
+  let teller, etikett, verschluss;
   gltf.scene.traverse(ob => {
     if (ob.isMesh && !['glas', 'etikett', 'verschluss'].some(n => ob.name.toLowerCase().includes(n))) {
       teller = new Teller(ob, lichtbilder, tex.teller);
@@ -140,12 +152,13 @@ export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDate
         normalScale: new THREE.Vector2(0.08, 0.08), anisotropy: 0.75, anisotropyRotation: 0,
         envMapIntensity: 1.0 });
       ob.material.roughnessNode = texture(tex.verschluss_rauheit).r.mul(0.3).add(0.15);
+      verschluss = ob;
     }
   });
   gruppe.add(gltf.scene);
   baueBoden(szene);
 
-  const glas = new Glas(feldDaten, hdr, tex, teller.lichtWelt);
+  const glas = new Glas(feldDaten, hdr, tex, teller.lichtWelt, opt.halb);
   let glasMesh;
   glasGltf.scene.traverse(ob => {
     if (!ob.isMesh) return;
@@ -154,6 +167,11 @@ export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDate
     ob.renderOrder = 3;
   });
   if (!glasMesh) throw new Error('Export glas.glb enthält kein Glasnetz');
+  // Echtzeit-Licht auf dem Teller: nur mit Rechenshadern (WebGPU), sonst bleiben die LuxCore-Bilder (Vertrag §6.9)
+  if (opt.renderer && opt.raster) {
+    teller.echt = new EchtzeitLicht(opt.renderer, glas, glasMesh.geometry, opt.raster, opt.pixel);
+    teller.uEcht.value = 1;
+  }
   gruppe.add(glasGltf.scene);
 
   // Bläschen: winzige Lichtpunkte im Glas, nach dem Glas gezeichnet (ohne Tiefentest), Rand hell und Mitte
@@ -182,5 +200,5 @@ export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDate
   blasen.renderOrder = 4;
   blasen.frustumCulled = false;
   gruppe.add(blasen);
-  return { glas, glasMesh, blasen, teller, uBlasen, etikett };
+  return { glas, glasMesh, blasen, teller, uBlasen, etikett, verschluss };
 }

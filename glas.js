@@ -14,10 +14,17 @@ const IOR_GLAS = 1.5, IOR_FLUESSIG = 1.36;
 // LuxCore: Transmission (0,99, 0,55, 0,10) nach 25 mm → Absorptionskoeffizient je Meter
 export const ABSORPTION = [-Math.log(0.99) / 0.025, -Math.log(0.55) / 0.025, -Math.log(0.10) / 0.025];
 
-export function sdfTextur(feldDaten) {
-  const t = new THREE.Data3DTexture(feldDaten, ...SDF_N);
+/** Abstandsfeld als 3D-Textur. halb = true: 16-Bit-Gleitkomma — überall linear filterbar, auch wo 32-Bit-Texturen es
+ *  nicht sind (WebGL 2 ohne OES_texture_float_linear, WebGPU ohne float32-filterable; Gegenprüfung T2n, Befund 4). */
+export function sdfTextur(feldDaten, halb = false) {
+  let daten = feldDaten;
+  if (halb) {
+    daten = new Uint16Array(feldDaten.length);
+    for (let i = 0; i < daten.length; i++) daten[i] = THREE.DataUtils.toHalfFloat(feldDaten[i]);
+  }
+  const t = new THREE.Data3DTexture(daten, ...SDF_N);
   t.format = THREE.RedFormat;
-  t.type = THREE.FloatType;
+  t.type = halb ? THREE.HalfFloatType : THREE.FloatType;
   t.minFilter = t.magFilter = THREE.LinearFilter;
   t.wrapS = t.wrapT = t.wrapR = THREE.ClampToEdgeWrapping;
   t.needsUpdate = true;
@@ -41,7 +48,7 @@ export const ETIKETT = { r: 0.0341, halb: 54.166 * Math.PI / 180, y0: 0.0174, y1
 export const VERSCHLUSS = { r: 0.017, y0: 0.120, y1: 0.145 };
 
 export class Glas {
-  constructor(feldDaten, hdr, tex, tellerLicht) {
+  constructor(feldDaten, hdr, tex, tellerLicht, halb = false) {
     this.uR = uniform(new THREE.Matrix3());      // Flasche → Welt
     this.uRT = uniform(new THREE.Matrix3());     // Welt → Flasche
     this.uKam = uniform(new THREE.Vector3(0, 0.1, 0.6)); // Kamera in Flaschenkoordinaten
@@ -63,7 +70,7 @@ export class Glas {
     this.uVerzerrung = uniform(0.2);
     this.uEtikett = uniform(1);  // 0: Etikett ausgeblendet (Testzugang)
     this.uFein = uniform(1);     // 0: Sparstufe ohne Oberflächenstruktur und Nebenstrahlen
-    const sdfTex = sdfTextur(feldDaten);
+    const sdfTex = this.sdfTex = sdfTextur(feldDaten, halb);
 
     const koord = p => vec3(
       p.x.sub(SDF_U[0]).div(SDF_S).add(0.5).div(SDF_N[0]),

@@ -1,11 +1,36 @@
 import * as THREE from 'three';
 import { GLTFLoader } from './lib/GLTFLoader.js';
-import { VolumenTabelle } from './volumen.js';
-import { Schwappmodell, DT, qVonWinkel, qMal, winkelableitung } from './schwappen.js';
-import { ladeHDR } from './hdr.js';
-import { baueAussehen } from './aussehen.js';
-import { ENV_DREHUNG_Y } from './glas.js';
-import { baueGlaettung } from './glaettung.js';
+
+// Die eigenen Module werden erst in main() geladen: fehlt eines (kaputte Auslieferung), landet der Fehler im Fang
+// unten und die Seite zeigt einen Satz statt einer endlosen Ladeanzeige (Gegenprüfung T2n, Befund 1).
+let VolumenTabelle, Schwappmodell, DT, qVonWinkel, qMal, winkelableitung, ladeHDR, baueAussehen, ENV_DREHUNG_Y, baueGlaettung;
+async function ladeModule() {
+  const [v, s, h, a, g, k] = await Promise.all([import('./volumen.js'), import('./schwappen.js'), import('./hdr.js'),
+    import('./aussehen.js'), import('./glas.js'), import('./glaettung.js')]);
+  ({ VolumenTabelle } = v);
+  ({ Schwappmodell, DT, qVonWinkel, qMal, winkelableitung } = s);
+  ({ ladeHDR } = h); ({ baueAussehen } = a); ({ ENV_DREHUNG_Y } = g); ({ baueGlaettung } = k);
+}
+
+/** Volumen-Tabelle in einem Arbeiter-Thread bauen (volumen.js selbst bleibt unverändert); die Seite bleibt dabei
+ *  bedienbar und lädt weiter (Gegenprüfung T2n, Befund 3). Geht das nicht, wird wie bisher an Ort und Stelle gebaut. */
+function baueTabelle(feldDaten, hoehlung, fuellung) {
+  return new Promise(fertig => {
+    const ersatz = () => fertig(new VolumenTabelle(feldDaten, hoehlung, fuellung));
+    let arbeiter;
+    try {
+      arbeiter = new Worker(new URL('./volumen-arbeiter.js', import.meta.url), { type: 'module' });
+    } catch (_) { ersatz(); return; }
+    arbeiter.onmessage = e => {
+      arbeiter.terminate();
+      if (!e.data || !e.data.tabelle) { ersatz(); return; }
+      // Gleiche Klasse, gleiche Abfragen — nur die Felder kommen fertig gerechnet aus dem Arbeiter
+      fertig(Object.assign(Object.create(VolumenTabelle.prototype), e.data.tabelle));
+    };
+    arbeiter.onerror = () => { arbeiter.terminate(); ersatz(); };
+    arbeiter.postMessage({ feld: feldDaten, hoehlung, fuellung });
+  });
+}
 
 const canvas = document.querySelector('canvas');
 const status = document.querySelector('#status');
@@ -17,8 +42,11 @@ let gehalten = false, ziehen = false, geste = '', letzteX = 0, letzteY = 0, star
 let gierTempo = 0, gierSchwung = 0, letzteZeit = 0, letzteBewegung = 0;
 let qAlt = [0, 0, 0, 1], omegaAlt = [0, 0, 0], gerechnet = 0;
 let pixelDichte = 1, dichteAbzug = 0, sparstufe = 0, ausgabe = null;
+// Echtzeit-Licht auf dem Teller (§6.9): lichtTakt 1 = jedes Bild, 2 = jedes zweite; lichtStufe 0 voll, 1 klein, 2 aus
+let lichtTakt = 1, lichtStufe = 0, bildNr = 0;
 // Zoom der Kamera (1 bis 3): ein Ausschnitt des vollen Bildes; zoomX/zoomY = linke obere Ecke des Ausschnitts (0..1)
 let zoom = 1, zoomX = 0, zoomY = 0;
+let flakonAn = true, etikettAn = true;
 const finger = new Map();
 let pinch = null, tippZeit = 0, tippX = 0, tippY = 0, druckZeit = 0, druckWeg = 0;
 let bereitAufloesen, bereitAblehnen;
@@ -34,6 +62,17 @@ function aktualisiere() {
   gruppe.quaternion.set(q[0], q[1], q[2], q[3]);
   aussehen.glas.aktualisiere(modell, kamera.position);
   aussehen.teller.setze(gier, Math.hypot(winkelX, winkelZ));
+  if (lichtAn()) aussehen.teller.echt.aktualisiere(aussehen.glas);
+}
+
+function lichtAn() {
+  return !!(aussehen && aussehen.teller.echt && aussehen.teller.echt.aktiv);
+}
+
+function lichtAus() {
+  if (!lichtAn()) return;
+  aussehen.teller.uEcht.value = 0;       // ab jetzt wieder die LuxCore-Bilder
+  aussehen.teller.echt.aktiv = false;    // nicht mehr rechnen; die Lichttextur bleibt (der Shader kennt sie noch)
 }
 
 function schrittMitBewegung() {
@@ -85,7 +124,19 @@ const kontroller = {
   oberflaecheY: xz => modell.oberflaecheY(xz),
   neigungGrad: () => Math.hypot(winkelX, winkelZ) * 180 / Math.PI,
   zeigeFluessigkeit(an) { aussehen.glas.uFluessig.value = an ? 1 : 0; },
-  zeigeEtikett(an) { aussehen.etikett.visible = !!an; aussehen.glas.uEtikett.value = an ? 1 : 0; },
+  zeigeEtikett(an) { etikettAn = !!an; aussehen.etikett.visible = etikettAn && flakonAn; aussehen.glas.uEtikett.value = an ? 1 : 0; },
+  tellerLicht: () => lichtAn() ? 'echtzeit' : 'bilder',
+  lichtBild: () => lichtAn() ? aussehen.teller.echt.lies() : null,   // nur für Eichung und Sichtung
+  lichtStufe(n) { if (n >= 2) { lichtStufe = 2; lichtAus(); } else if (n === 1 && lichtAn()) lichtKlein(); },   // nur für Sichtung: Stufen der Selbstanpassung
+  lichtWerte(w) { if (lichtAn()) for (const [n, v] of Object.entries(w)) aussehen.teller.echt[n].value = v; },
+  // Nur das Zeichnen des Flakons aus/ein; das Licht auf dem Teller wird weiter gerechnet, als wäre er da
+  zeigeFlakon(an) {
+    flakonAn = !!an;
+    aussehen.glasMesh.visible = flakonAn;
+    aussehen.verschluss.visible = flakonAn;
+    aussehen.etikett.visible = flakonAn && etikettAn;
+    aussehen.blasen.visible = flakonAn && sparstufe === 0;
+  },
   zoom: () => zoom,
   setzeZoom(z, fx = 0.5, fy = 0.5) { setzeZoom(z, fx, fy, fx, fy); },
   loslassen() {
@@ -215,13 +266,16 @@ function zeiger() {
   if (window.visualViewport) visualViewport.addEventListener('resize', resize);
 }
 
-// Selbstanpassung (§6.4): erst die Auflösung stufenweise bis Pixel-Dichte 1, dann die teuren Wirkungen:
-// Stufe 1 Bläschen und Marschschritte, Stufe 2 Oberflächenstruktur und Nebenstrahlen des Glases, Stufe 3 Nachglättung.
+// Selbstanpassung (§6.4, §6.9): erst die Auflösung stufenweise bis Pixel-Dichte 1, dann das Echtzeit-Licht klein
+// (Raster 128, jedes zweite Bild), dann die teuren Wirkungen: Stufe 1 Bläschen und Marschschritte, Stufe 2
+// Oberflächenstruktur und Nebenstrahlen des Glases, Stufe 3 Nachglättung; zuletzt das Echtzeit-Licht aus (Bilder).
 function fpsAnpassen(schnitt) {
   if (schnitt >= 45) return;
   if (pixelDichte > 1.01) {
     dichteAbzug += 0.2;
     resize();
+  } else if (lichtAn() && lichtStufe === 0) {
+    lichtKlein();
   } else if (sparstufe === 0) {
     sparstufe = 1;
     aussehen.blasen.visible = false;
@@ -232,15 +286,29 @@ function fpsAnpassen(schnitt) {
   } else if (sparstufe === 2) {
     sparstufe = 3;
     ausgabe = null;                       // ohne Nachglättung direkt zeichnen (MSAA bleibt)
+  } else if (lichtAn()) {
+    lichtStufe = 2;
+    lichtAus();                           // letzte Stufe: Tellerlicht wieder aus den LuxCore-Bildern
   }
 }
 
+// Handy-Stufe des Echtzeit-Lichts (§6.9): Raster 128 × 128 und nur jedes zweite Bild neu
+function lichtKlein() {
+  lichtStufe = 1;
+  lichtTakt = 2;
+  const echt = aussehen.teller.echt;
+  if (echt.raster > 128) echt.setzeRaster(128);
+  echt.uMisch.value = 0.7;
+}
+
 function zeichne() {
+  if (lichtAn() && bildNr++ % lichtTakt === 0) aussehen.teller.echt.rechne();
   if (ausgabe) ausgabe.render();
   else renderer.render(szene, kamera);
 }
 
 async function main() {
+  await ladeModule();
   if (params.has('test')) {
     const { testeZugang } = await import('./testzugang.js');
     testeZugang(kontroller);
@@ -272,11 +340,33 @@ async function main() {
   szene.add(gruppe);
   const feldDaten = new Float32Array(feld);
   if (status) status.textContent = 'Volumen-Tabelle wird aufgebaut …';
-  await new Promise(r => setTimeout(r, 0));
-  const tabelle = new VolumenTabelle(feldDaten, beschreibung.hoehlung, beschreibung.fuellung);
+  const tabelleKommt = baueTabelle(feldDaten, beschreibung.hoehlung, beschreibung.fuellung);
+  const webgpu = renderer.backend.isWebGPUBackend === true;
+  // Abstandsfeld als 16-Bit-Textur, wo 32-Bit nicht linear filterbar ist (Gegenprüfung T2n, Befund 4); ?feld16 erzwingt es
+  const halb = params.has('feld16') || (webgpu ? !renderer.hasFeature('float32-filterable')
+    : !renderer.backend.gl.getExtension('OES_texture_float_linear'));
+  // Echtzeit-Licht nur mit Rechenshadern (WebGPU); am Handy gleich in der kleinen Stufe
+  const handy = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 700;
+  const aussehenNeu = await baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDaten, hdr,
+    { renderer, raster: webgpu && !params.has('bilder') ? (Number(params.get('raster')) || (handy ? 128 : 256)) : 0,
+      pixel: Number(params.get('lichtpx')) || (handy ? 512 : 1024), halb });
+  // Während der Arbeiter die Tabelle rechnet: die Shader in Portionen vorbereiten (erst das Tellerlicht, dann die
+  // Szene), damit das erste Bild die Seite nicht am Stück blockiert (Gegenprüfung T2n, Befund 3)
+  const pause = () => new Promise(r => setTimeout(r, 0));
+  await pause();
+  if (aussehenNeu.teller.echt) {
+    aussehenNeu.teller.echt.aktualisiere(aussehenNeu.glas);
+    aussehenNeu.teller.echt.rechne();
+    await pause();
+  }
+  resize();
+  await renderer.compileAsync(szene, kamera);
+  await pause();
+  const tabelle = await tabelleKommt;
   modell = new Schwappmodell(beschreibung, tabelle);
   modell.regler(50, 50);
-  aussehen = await baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDaten, hdr);
+  aussehen = aussehenNeu;
+  if (lichtAn() && handy) lichtKlein();
   aktualisiere();
 
   for (const e of document.querySelectorAll('input[type=range][data-regler]')) {

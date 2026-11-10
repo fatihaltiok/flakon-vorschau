@@ -30,6 +30,16 @@
     <p>Gerendert mit LuxCore</p>
   </section>
   <footer>Beispielseite · 3D-Probe</footer>
-  <script type="module" src="./flakon.js"></script>
+  <script>
+    // Lädt das Programm selbst nicht (kaputte Auslieferung), erscheint ein Satz statt der endlosen Ladeanzeige
+    function flakonLadefehler() {
+      if (document.documentElement.dataset.flakon) return;
+      document.documentElement.dataset.flakon = 'fehler';
+      var ziel = document.querySelector('#status') || document.querySelector('#fehler'), lade = document.querySelector('#lade');
+      if (ziel) { ziel.hidden = false; ziel.textContent = 'Die 3D-Ansicht konnte nicht geladen werden.'; }
+      if (lade) lade.hidden = true;
+    }
+  </script>
+  <script type="module" src="./flakon.js" onerror="flakonLadefehler()"></script>
 </body>
 </html>
