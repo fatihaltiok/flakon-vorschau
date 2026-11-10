@@ -48,7 +48,8 @@ export const ETIKETT = { r: 0.0341, halb: 54.166 * Math.PI / 180, y0: 0.0174, y1
 export const VERSCHLUSS = { r: 0.017, y0: 0.120, y1: 0.145 };
 
 export class Glas {
-  constructor(feldDaten, hdr, tex, tellerLicht, halb = false) {
+  /** tuchFarbe(P, V): Farbe des Tuchs an der Stelle P der Tuchebene, gesehen aus Richtung V (Flaschenkoordinaten) */
+  constructor(feldDaten, hdr, tex, tuchFarbe, halb = false) {
     this.uR = uniform(new THREE.Matrix3());      // Flasche → Welt
     this.uRT = uniform(new THREE.Matrix3());     // Welt → Flasche
     this.uKam = uniform(new THREE.Vector3(0, 0.1, 0.6)); // Kamera in Flaschenkoordinaten
@@ -95,21 +96,15 @@ export class Glas {
       const spot = smoothstep(0.9990, 0.9997, cosS).mul(this.uSpot).mul(float(1).sub(float(rauheit).mul(3)).clamp(0, 1));
       return pmremTexture(hdr, envRichtung(dirW), float(rauheit)).mul(this.uGain).add(spot);
     };
-    // Boden und Teller liegen nah: Strahlen nach unten schneiden die Ebene y = −0,006 (Welt) statt das Panorama
-    // zu fragen (das kennt keine Parallaxe). Innerhalb 90 mm: Teller mit gebackenem Licht, sonst dunkler Boden
-    // mit dem Kegel des Spots.
-    const bodenFarbe = (pW, dW) => {
-      const t = float(-0.006).sub(pW.y).div(dW.y.min(-1e-4));
-      const h = pW.add(dW.mul(t));
-      const r = h.xz.length();
-      const teller = tellerLicht(h.x, h.z);
-      const kegel = smoothstep(0.26, 0.05, h.xz.sub(vec2(0.01, 0.03)).length()).mul(0.05).add(0.003);
-      return select(r.lessThan(0.088), teller, vec3(kegel));
+    // Das Tuch liegt nah: Strahlen nach unten schneiden die Tuchebene y = 0 (Flaschenkoordinaten, das Tuch kippt
+    // mit) statt das Panorama zu fragen (das kennt keine Parallaxe) und sehen dort das Tuch mit seinem Licht.
+    const bodenFarbe = (pF, dF) => {
+      const t = pF.y.max(0).div(dF.y.min(-1e-4).negate());
+      return tuchFarbe(pF.add(dF.mul(t)), dF.negate());
     };
     const env = (pF, dF, rauheit) => {
-      const dW = this.uR.mul(dF), pW = this.uR.mul(pF);
-      const unten = smoothstep(0.03, -0.03, dW.y);
-      return mix(envFern(dW, rauheit), bodenFarbe(pW, dW), unten);
+      const unten = smoothstep(0.03, -0.03, dF.y);
+      return mix(envFern(this.uR.mul(dF), rauheit), bodenFarbe(pF, dF), unten);
     };
     // Verschluss durch das Glas gesehen: Strahl (Flasche) gegen den Zylinder der Kappe — Unterkante von unten,
     // Mantel von außen. Gebürstetes Metall: verwaschene Spiegelung der Umgebung.
@@ -247,7 +242,7 @@ export class Glas {
       const G0 = vec3(P0).toVar();     // Ausgangspunkt des Strahls im Glas (nach einer Bodenspiegelung der Spiegelpunkt)
       // Massiver Sockel: Ein flach nach unten laufender Strahl trifft die ebene Standfläche (y = 0) jenseits des
       // Grenzwinkels (41,8°) und wird vollständig gespiegelt — der Sockel zeigt dann von unten die Höhlung mit
-      // der Flüssigkeit statt eines grauen Tellers (so auch im LuxCore-Bild).
+      // der Flüssigkeit statt der Unterlage (so auch im LuxCore-Bild).
       const tb = P0.y.negate().div(T.y.min(-1e-4));
       const hb = P0.add(T.mul(tb));
       If(g1.tref.lessThan(0.5).and(T.y.lessThan(-0.02)).and(T.y.greaterThan(-0.745)).and(hb.xz.length().lessThan(0.0325)), () => {
@@ -343,7 +338,7 @@ export class Glas {
           const T5ok = T5.dot(T5).greaterThan(1e-6);
           T5.assign(T5ok.select(T5.normalize(), T4));
           // Was hinter der Flasche liegt, klar und scharf: Etikett-Rückseite (Strahl im Glas gegen die
-          // Etikettfläche), sonst Verschluss, Teller, Boden, Gegenlicht und Umgebung — in der Flüssigkeit ohne
+          // Etikettfläche), sonst Verschluss, Tuch, Gegenlicht und Umgebung — in der Flüssigkeit ohne
           // Nebel, nur über die Weglänge getönt (Vertrag §6.8).
           // Der Sehstrahl zum Etikett wird nur zum Teil gebrochen (uVerzerrung): mit der vollen Brechung der
           // unregelmäßigen Innenwand zerfällt die Schrift in Fetzen; Fatih will sie „nicht übertrieben, aber ein

@@ -1,15 +1,18 @@
-// web/tellerlicht.js — Echtzeit-Licht auf dem Teller (Vertrag §6.9), nur WebGPU.
+// web/tellerlicht.js — Echtzeit-Licht auf dem Tuch (Vertrag §6.9, §6.10), nur WebGPU.
 // Ein Rechenshader verfolgt je Bild ein Raster von Strahlen vom Spotlicht (Ort wie szene/flakon.py Licht_Haupt) durch
 // den Flakon: Außenhaut (Tabelle Radius über Winkel und Höhe, aus dem Glasnetz), Glaswand (Abstandsfeld der Höhlung
 // wie in glas.js), Flüssigkeit (dieselbe Fläche wie oberflaecheY, Absorption mit den LuxCore-Werten), wieder Glas und
-// hinaus. Jeder Strahl legt zwei Lichtflecken auf den Teller: wo er ohne Flakon gelandet wäre (das ergibt den
-// Schatten) und wo er nach den Brechungen landet (das gebündelte, gefärbte Licht). Die Flecken sind Gauß-Glocken,
-// deren Form aus den Nachbarstrahlen kommt (dicht gebündelt = klein und hell, zerstreut = groß und schwach), sie
-// werden in eine Lichttextur aufsummiert und über wenige Bilder gemittelt. Alles in Flaschenkoordinaten: der Teller
-// kippt und dreht mit dem Flakon, das Licht steht in der Welt fest.
+// hinaus. Jeder Strahl legt zwei Lichtflecken auf das Tuch: wo er ohne Flakon gelandet wäre (das ergibt den
+// Schatten) und wo er nach den Brechungen landet (das gebündelte, gefärbte Licht). Beide Treffpunkte sind der erste
+// Schnitt mit dem Höhenfeld des gefalteten Tuchs (Marsch durch dasselbe Höhenfeld, das gezeichnet wird). Die Flecken
+// sind Gauß-Glocken, deren Form aus den Nachbarstrahlen kommt (dicht gebündelt = klein und hell, zerstreut = groß
+// und schwach; auf einer Faltenflanke gestaucht oder gestreckt), sie werden in eine Lichttextur über (x, z)
+// aufsummiert und über wenige Bilder gemittelt. Beim Abfragen kommen der Einfallswinkel zur Tuchnormale und der
+// Schatten der Falten selbst dazu. Alles in Flaschenkoordinaten: das Tuch kippt und dreht mit dem Flakon, das Licht
+// steht in der Welt fest.
 import * as THREE from 'three';
 import { Break, Fn, If, Loop, atan, float, instanceIndex, instancedArray, int, max, min, mix, positionGeometry,
-  select, smoothstep, texture, texture3D, uniform, uv, varying, vec2, vec3, vec4 } from 'three/tsl';
+  select, smoothstep, step, texture, texture3D, uniform, uv, varying, vec2, vec3, vec4 } from 'three/tsl';
 import { ABSORPTION, ETIKETT, SDF_N, SDF_S, SDF_U, VERSCHLUSS } from './glas.js';
 
 // Hauptlicht (szene/flakon.py: Ort (0,15, 0,42, 0,38) Blender = (0,15, 0,38, −0,42) Web, zielt auf (0, 0,006, 0),
@@ -17,15 +20,20 @@ import { ABSORPTION, ETIKETT, SDF_N, SDF_S, SDF_U, VERSCHLUSS } from './glas.js'
 export const LICHT_ORT = new THREE.Vector3(0.15, 0.38, -0.42);
 const LICHT_ZIEL = new THREE.Vector3(0, 0.006, 0);
 const LICHT_ABSTAND = LICHT_ORT.distanceTo(LICHT_ZIEL);
-// Kegel des Spots, am LuxCore-Tellerbild abgelesen (Verhältnis Bildwert zu Einfallswinkel und Abstand je Winkel zur
-// Kegelachse): voll bis 2,5°, null ab 8,8°, dazwischen smoothstep hoch 1,2
-const KEGEL_INNEN = 2.5 * Math.PI / 180, KEGEL_AUSSEN = 8.8 * Math.PI / 180, KEGEL_HOCH = 1.2;
+// Kegel des Spots wie in LuxCore (Blender: Öffnung 0,42 rad, Blend 0,70): voll bis 3,6° zur Kegelachse, null ab 12,0°,
+// dazwischen ((cos − cos_außen) / (cos_innen − cos_außen)) hoch 2,9 — der Exponent ist an den LuxCore-Lichtbildern
+// des Tuchs gemessen (zwei Stellen bei 6,7° und 7,4°). Auf dem kleinen Teller (T3k) genügte eine am Bild abgelesene,
+// engere Näherung (2,5° bis 8,8°); auf dem Tuch ist der ganze Kegel mit seinem weichen Auslauf zu sehen.
+const KEGEL_COS_INNEN = Math.cos(0.21 * 0.30), KEGEL_COS_AUSSEN = Math.cos(0.21), KEGEL_HOCH = 2.9;
 // Heller Kern des Spots wie in den LuxCore-Tellerbildern (szene/export_web_aussehen.py: zweiter Kegel vom selben Ort,
 // 0,15 rad, Blend 0,35, dreifache Stärke, zielt auf (0, 0,04, 0)): er trifft nur den Flakon und verstärkt allein
 // das Licht, das durch Glas und Flüssigkeit geht — im Bild ist neben dem Schatten nichts davon zu sehen. Wirksame
 // Winkel wie beim Hauptkegel am Bild verkleinert: voll bis 2,2°, null ab 3,3°.
 const KERN_ZIEL = new THREE.Vector3(0, 0.040, 0), KERN_INNEN = 2.2 * Math.PI / 180, KERN_AUSSEN = 3.3 * Math.PI / 180, KERN_FAKTOR = 3;
-const GLAS_H = 0.12, TELLER_R = 0.09, TELLER_BREITE = 0.18;
+const GLAS_H = 0.12;
+// Die Lichttextur deckt dieses Quadrat um die Flaschenachse (Lichtkegel und Schatten auf dem Tuch)
+export const LICHT_BREITE = 0.40;
+const TREFFER_SCHRITTE = 24, FALTEN_SCHRITTE = 8;
 const TAB_W = 512, TAB_H = 256;
 const K1 = Math.PI / 0.05, K2 = 2 * Math.PI / 0.05;   // Wellen wie glas.js / schwappen.js
 const IOR_GLAS = 1.5, IOR_FLUESSIG = 1.36;
@@ -109,10 +117,41 @@ export function baueAussenhaut(geo) {
   return tex;
 }
 
+/** Lage des Hauptlichts in Flaschenkoordinaten (das Licht steht in der Welt fest, Flakon und Tuch drehen und kippen).
+ *  Gilt für das Echtzeit-Licht und für den Ersatz mit Bildern. */
+export class Lichtlage {
+  constructor() {
+    this.uL = uniform(new THREE.Vector3().copy(LICHT_ORT));   // Lichtort (Flasche)
+    this.uAchse = uniform(new THREE.Vector3());    // Kegelachse des Spots (Flasche, vom Licht weg)
+    this.uKern = uniform(new THREE.Vector3());     // Achse des hellen Kerns
+    this.uD0 = uniform(0.54);                      // Abstand Licht – Rastermitte (Bezug der Helligkeit)
+    this.uStark = uniform(1);                      // 0, wenn das Licht das Tuch nur noch streift (stark gekippt)
+    this.mitte = new THREE.Vector3(0, 0.0725, 0);
+    this.cos = 1;
+    this.aktualisiere(new THREE.Matrix3());
+  }
+
+  /** RT: Welt → Flasche (glas.uRT) */
+  aktualisiere(RT) {
+    const L = this.uL.value.copy(LICHT_ORT).applyMatrix3(RT);
+    this.uAchse.value.copy(LICHT_ZIEL).sub(LICHT_ORT).normalize().applyMatrix3(RT);
+    this.uKern.value.copy(KERN_ZIEL).sub(LICHT_ORT).normalize().applyMatrix3(RT);
+    this.uD0.value = this.mitte.distanceTo(L);
+    this.cos = (L.y - this.mitte.y) / this.uD0.value;
+    this.uStark.value = THREE.MathUtils.smoothstep(this.cos, 0.08, 0.22);
+  }
+
+  /** Stärke des Lichts in einer Richtung (vom Licht weg), bezogen auf die Kegelmitte */
+  kegelAn(r) {
+    return r.dot(this.uAchse).sub(KEGEL_COS_AUSSEN).div(KEGEL_COS_INNEN - KEGEL_COS_AUSSEN).clamp(0, 1).pow(KEGEL_HOCH);
+  }
+}
+
 export class EchtzeitLicht {
   /** glas: Glas-Objekt aus glas.js (Abstandsfeld und die Uniforms der Flüssigkeit), glasGeo: Netz der Außenhaut,
+   *  tuch: Höhenfeld des Tuchs (hoeheAn(x, z) in Metern, uHmax größte Höhe), lage: Lichtlage,
    *  raster: Strahlen je Kante (256 am Rechner, 128 am Handy). */
-  constructor(renderer, glas, glasGeo, raster = 256, pixel = 512) {
+  constructor(renderer, glas, glasGeo, tuch, lage, raster = 256, pixel = 512) {
     const LICHT_PIXEL = this.pixel = pixel;       // Kantenlänge der Lichttextur
     this.renderer = renderer;
     this.aktiv = true;
@@ -121,29 +160,28 @@ export class EchtzeitLicht {
     const sdfTex = glas.sdfTex;
 
     // ---------- Uniforms ----------
-    this.uL = uniform(new THREE.Vector3());        // Lichtort (Flasche)
-    this.uAchse = uniform(new THREE.Vector3());    // Kegelachse des Spots (Flasche, vom Licht weg)
-    this.uKern = uniform(new THREE.Vector3());     // Achse des hellen Kerns
-    this.uD0 = uniform(0.54);                      // Abstand Licht – Rastermitte
+    this.lage = lage;
+    this.uL = lage.uL;
+    this.uAchse = lage.uAchse;
+    this.uKern = lage.uKern;
+    this.uD0 = lage.uD0;
     this.uZ = uniform(new THREE.Vector3(0, 0.0725, 0));
     this.uU = uniform(new THREE.Vector3());        // halbe Rasterbreite (Vektor)
     this.uV = uniform(new THREE.Vector3());        // halbe Rasterhöhe (Vektor)
     this.uZelle = uniform(0);                      // Fläche einer Rasterzelle senkrecht zum Licht (m²)
-    this.uCos = uniform(1);                        // Einfallswinkel auf den Teller (Kosinus)
-    this.uStark = uniform(1);                      // 0, wenn das Licht den Teller nur noch streift (stark gekippt)
+    this.uStark = lage.uStark;
     this.uMisch = uniform(0.5);                    // Anteil des neuen Bildes in der zeitlichen Mittelung
-    // Eichung an den LuxCore-Tellerbildern (Werte wie das entzerrte Bild, vor uGain des Tellers)
-    this.uDirekt = uniform(0.50);                  // direkt beleuchteter Teller
+    // Eichung an den LuxCore-Tellerbildern T3k (Werte wie das entzerrte Bild, vor uGain der Unterlage)
+    this.uDirekt = uniform(0.50);                  // direktes Licht bei senkrechtem Einfall in der Kegelmitte
     this.uKaustik = uniform(0.8);                  // Licht durch Glas und Flüssigkeit
     this.uGrund = uniform(0.004);                  // Licht der Softboxen (im Schatten sichtbar)
     this.uSaettigung = uniform(1.0);
     this.uFleck = uniform(0.8);                    // Breite der Lichtflecken in Strahlabständen
-    this.uEps = uniform(0.8 * TELLER_BREITE / pixel);   // kleinste Fleckbreite (m): knapp ein Bildpunkt der Lichttextur
-    // Gesamthelligkeit: die Tellerbilder ließen den Teller dunkler als das LuxCore-Standbild (Bericht T2n §6);
-    // am Standbild gemessen (beleuchteter Teller dort 82, mit den Bildern 57, hiermit 79–81) liegt das Echtzeit-Licht darum höher
+    this.uEps = uniform(0.8 * LICHT_BREITE / pixel);   // kleinste Fleckbreite (m): knapp ein Bildpunkt der Lichttextur
+    // Gesamthelligkeit des Lichts (seit T3k am LuxCore-Standbild ausgerichtet); die Helligkeit des Tuchs selbst
+    // stellt tuch.js ein
     this.uHell = uniform(2.8);
-    // Stärke des Lichts in einer Richtung (vom Licht weg), bezogen auf die Kegelmitte
-    const kegelAn = r => smoothstep(KEGEL_AUSSEN, KEGEL_INNEN, r.dot(this.uAchse).clamp(-1, 1).acos()).pow(KEGEL_HOCH);
+    const kegelAn = r => lage.kegelAn(r);
     const kernAn = r => smoothstep(KERN_AUSSEN, KERN_INNEN, r.dot(this.uKern).clamp(-1, 1).acos()).mul(KERN_FAKTOR).add(1);
     const uNf = glas.uNf, uD = glas.uD, uA = glas.uA, uFl = glas.uFluessig, uEt = glas.uEtikett, uSchlieren = glas.uSchlieren;
 
@@ -206,6 +244,28 @@ export class EchtzeitLicht {
       return { T, F, tir, R };
     };
 
+    // Erster Treffer eines abwärts laufenden Strahls auf dem Tuch: bis zur Oberkante der Falten springen, dann in
+    // gleichen Schritten bis zur Bodenebene, den Übergang durch Halbieren eingrenzen. Flaches Tuch: Schnitt mit y = 0.
+    const tuchTreffer = (start, d) => {
+      const ab = d.y.min(-1e-4).negate();
+      const t0 = start.y.sub(tuch.uHmax).max(0).div(ab);
+      const dt = start.y.max(0).div(ab).sub(t0).div(TREFFER_SCHRITTE).toVar();
+      const t = float(t0).toVar(), vor = float(t0).toVar();
+      Loop(TREFFER_SCHRITTE, () => {
+        t.addAssign(dt);
+        const q = start.add(d.mul(t)).toVar();
+        If(q.y.lessThanEqual(tuch.hoeheAn(q.x, q.z)), () => { Break(); });
+        vor.assign(t);
+      });
+      Loop(5, () => {
+        const m = vor.add(t).mul(0.5).toVar();
+        const q = start.add(d.mul(m)).toVar();
+        If(q.y.lessThanEqual(tuch.hoeheAn(q.x, q.z)), () => { t.assign(m); }).Else(() => { vor.assign(m); });
+      });
+      return { ort: start.add(d.mul(t)), weg: t };
+    };
+    const aufKarte = q => max(q.x.abs(), q.z.abs()).lessThan(LICHT_BREITE / 2 - 0.001);
+
     // ---------- Lichttextur: Rohbild und zwei Ziele für die zeitliche Mittelung ----------
     const ziel = () => new THREE.RenderTarget(LICHT_PIXEL, LICHT_PIXEL, { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
       depthBuffer: false, samples: 0, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
@@ -217,11 +277,13 @@ export class EchtzeitLicht {
       const ANZ = N * N;
       this.raster = N;
       // ---------- Speicher ----------
+      if (this.szene) this.raeume();                 // alte Speicher, Rechenschritte und Flecken freigeben
       const bLand = instancedArray(ANZ, 'vec4');     // x, z des Auftreffpunkts, Weg vom Austritt, Zustand (2 = Licht)
       const bFarbe = instancedArray(ANZ, 'vec4');    // Gewicht je Farbe
       const bGerade = instancedArray(ANZ, 'vec4');   // x, z ohne Flakon, Weg vom Hindernis, 1 = verdeckt
       const kA = instancedArray(ANZ, 'vec4'), kB = instancedArray(ANZ, 'vec4'), kC = instancedArray(ANZ, 'vec4');
       const sA = instancedArray(ANZ, 'vec4'), sB = instancedArray(ANZ, 'vec4');
+      this.speicher = [bLand, bFarbe, bGerade, kA, kB, kC, sA, sB];
 
       // ---------- Rechenschritt 1: Strahlen verfolgen ----------
       this.verfolgen = Fn(() => {
@@ -231,8 +293,8 @@ export class EchtzeitLicht {
         const o = this.uL;
         const d = this.uZ.add(this.uU.mul(fx)).add(this.uV.mul(fy)).sub(o).normalize().toVar();
         const d0 = vec3(d).toVar();
-        // Wo der Strahl ohne Flakon landet
-        const gerade = o.add(d0.mul(o.y.negate().div(d0.y.min(-1e-4)))).toVar();
+        // Wo der Strahl ohne Flakon auf dem Tuch landet
+        const gerade = vec3(tuchTreffer(o, d0).ort).toVar();
         // Verschluss: Zylinder (Mantel und Deckel), undurchsichtig
         const ca = d0.xz.dot(d0.xz).max(1e-8), cb = o.xz.dot(d0.xz), cc = o.xz.dot(o.xz).sub(VERSCHLUSS.r ** 2);
         const disk = cb.mul(cb).sub(ca.mul(cc));
@@ -349,16 +411,17 @@ export class EchtzeitLicht {
           If(zustand.greaterThan(1.5), () => {
             zustand.assign(1);
             If(d.y.lessThan(-0.02), () => {
-              const t = p.y.max(0).div(d.y.negate());
-              land.assign(p.add(d.mul(t)));
-              weg.assign(t);
-              If(land.xz.length().lessThan(TELLER_R - 0.0005), () => { zustand.assign(2); });
+              const tr = tuchTreffer(p, d);
+              land.assign(tr.ort);
+              weg.assign(tr.weg);
+              If(aufKarte(land), () => { zustand.assign(2); });
             });
           });
         });
         bLand.element(instanceIndex).assign(vec4(land.x, land.z, weg, zustand));
         bFarbe.element(instanceIndex).assign(vec4(w, 1));
-        bGerade.element(instanceIndex).assign(vec4(gerade.x, gerade.z, hindernis.sub(gerade).length(), zustand.min(1)));
+        bGerade.element(instanceIndex).assign(vec4(gerade.x, gerade.z, hindernis.sub(gerade).length(),
+          select(aufKarte(gerade), zustand.min(1), 0.0)));
       })().compute(ANZ);
 
       // ---------- Rechenschritt 2: Form der Lichtflecken aus den Nachbarstrahlen ----------
@@ -408,7 +471,7 @@ export class EchtzeitLicht {
         const m = new THREE.NodeMaterial();
         const a = A.toAttribute(), b = B.toAttribute();
         const versatz = positionGeometry.xy.mul(a.zw);
-        m.vertexNode = vec4(a.xy.add(versatz).div(TELLER_R), 0, 1);
+        m.vertexNode = vec4(a.xy.add(versatz).div(LICHT_BREITE / 2), 0, 1);
         const vV = varying(versatz), vB = varying(b);
         const glocke = vV.x.mul(vV.x).mul(vB.x).add(vV.x.mul(vV.y).mul(vB.y).mul(2)).add(vV.y.mul(vV.y).mul(vB.z)).mul(-0.5).exp().mul(vB.w);
         m.fragmentNode = C ? vec4(varying(C.toAttribute().xyz).mul(glocke), 0) : vec4(0, 0, 0, glocke);
@@ -421,7 +484,6 @@ export class EchtzeitLicht {
         m.side = THREE.DoubleSide;
         return m;
       };
-      if (this.szene) this.raeume();
       this.szene = new THREE.Scene();
       for (const m of [material(kA, kB, kC), material(sA, sB, null)]) {
         const netz = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), m);
@@ -448,41 +510,64 @@ export class EchtzeitLicht {
       return new THREE.QuadMesh(m);
     });
 
-    // ---------- Abfrage für Teller und Glas ----------
+    // ---------- Abfrage für Tuch und Glas ----------
     this.tex = texture(this.verlauf[0].texture);
     const spotFarbe = vec3(1.0, 0.97, 0.92);
-    /** Licht an der Tellerstelle (x, z) in Flaschenkoordinaten; Werte wie die entzerrten LuxCore-Bilder. */
-    this.lichtLokal = (x, z) => {
-      // Zeile 0 der Lichttextur liegt bei z = +0,09 (Bildschirm-y nach oben beim Aufsummieren)
-      const t = this.tex.sample(vec2(x.div(TELLER_BREITE).add(0.5), float(0.5).sub(z.div(TELLER_BREITE))));
-      const zumLicht = this.uL.sub(vec3(x, 0, z));
+    /** Bestrahlung der Tuchstelle (x, z) in Flaschenkoordinaten mit der Tuchnormale N: direktes Licht (Einfallswinkel,
+     *  Schatten des Flakons, mit falten = true auch der Schatten der Falten), gebündeltes Licht und Grundlicht je
+     *  Tuchfläche; strahl = Licht senkrecht zum Strahl (für den Glanz), l = Richtung zum Licht. */
+    this.bestrahlung = (x, z, N, falten = true) => {
+      const h = tuch.hoeheAn(x, z);
+      const P = vec3(x, h, z);
+      // Zeile 0 der Lichttextur liegt bei z = +Rand (Bildschirm-y nach oben beim Aufsummieren)
+      const t = this.tex.sample(vec2(x.div(LICHT_BREITE).add(0.5), float(0.5).sub(z.div(LICHT_BREITE))))
+        .mul(step(max(x.abs(), z.abs()), LICHT_BREITE / 2));
+      const zumLicht = this.uL.sub(P);
       const abstand = zumLicht.length(), l = zumLicht.div(abstand);
+      const nl = N.dot(l).max(0);
       // Einheit: Bestrahlung senkrecht zum Licht im Abstand der Rastermitte (uD0); so zählen auch die Strahlen
-      const geo = l.y.max(0).mul(this.uD0.mul(this.uD0)).div(abstand.mul(abstand));
-      // Schatten: aufsummierte verdeckte Strahlen im Verhältnis zu dem, was ohne Flakon hier ankäme
-      // (0,94: Rand der Glocken und Schrägstellung des Rasters, an der Schattenmitte gemessen)
-      const schatten = t.a.div(geo.mul(0.94).max(0.02)).clamp(0, 1);
-      const direkt = geo.mul(kegelAn(l.negate())).mul(float(1).sub(schatten)).mul(this.uStark);
+      const fern = this.uD0.mul(this.uD0).div(abstand.mul(abstand));
+      // Die Lichttextur zählt Strahlen je Grundfläche (x, z): ohne Flakon kämen hier nl / N.y · fern an
+      const dichte = nl.div(N.y.max(0.2)).mul(fern);
+      // Schatten: aufsummierte verdeckte Strahlen im Verhältnis dazu (0,94: Rand der Glocken und Schrägstellung
+      // des Rasters, an der Schattenmitte gemessen)
+      const schatten = t.a.div(dichte.mul(0.94).max(0.02)).clamp(0, 1);
+      // Schatten der Falten: Weg zum Licht durch das Höhenfeld, bis er über allen Falten ist; der kleinste
+      // Freiwinkel zählt (weicher Rand von der Größe der Lichtquelle)
+      let frei = float(1);
+      if (falten) {
+        frei = Fn(() => {
+          const s1 = tuch.uHmax.sub(h).max(0).div(l.y.max(0.08));
+          const klar = float(1).toVar();
+          Loop(FALTEN_SCHRITTE, ({ i }) => {
+            const s = s1.mul(float(i).add(0.7).div(FALTEN_SCHRITTE));
+            const q = P.add(l.mul(s));
+            klar.assign(min(klar, q.y.sub(tuch.hoeheAn(q.x, q.z)).add(0.0003).div(s.max(0.002))));
+          });
+          return smoothstep(-0.01, 0.03, klar);
+        })();
+      }
+      const strahl = fern.mul(kegelAn(l.negate())).mul(float(1).sub(schatten)).mul(this.uStark).mul(frei)
+        .mul(this.uDirekt).mul(this.uHell);
       const grau = t.r.add(t.g).add(t.b).div(3);
-      const kaustik = mix(vec3(grau), t.rgb, this.uSaettigung).max(0);
+      const kaustik = mix(vec3(grau), t.rgb, this.uSaettigung).max(0).mul(N.y.max(0.2));
       // Licht der Softboxen: überall etwas, unter und dicht am Flakon weniger
-      const grund = this.uGrund.mul(float(1).sub(smoothstep(0.05, 0.02, vec2(x, z).length()).mul(0.55)));
-      return spotFarbe.mul(direkt.mul(this.uDirekt).add(kaustik.mul(this.uKaustik))).add(vec3(grund)).mul(this.uHell);
+      const grund = this.uGrund.mul(float(1).sub(smoothstep(0.05, 0.02, vec2(x, z).length()).mul(0.55))).mul(this.uHell);
+      return { direkt: spotFarbe.mul(strahl.mul(nl)), kaustik: spotFarbe.mul(kaustik).mul(this.uKaustik).mul(this.uHell),
+        grund, strahl, l, nl };
     };
     this._q = new THREE.Vector3();
     this._farbe = new THREE.Color();
     this.ruhe = 0;
     this.letzte = '';
+    this.zaehler = 0;      // Zahl der gerechneten Lichtbilder (für Abfragen, die das Ergebnis zwischenspeichern)
   }
 
   /** Lichtlage in Flaschenkoordinaten aus der Lage der Flasche (glas.uRT: Welt → Flasche). */
   aktualisiere(glas) {
     const RT = glas.uRT.value;
-    const L = this.uL.value.copy(LICHT_ORT).applyMatrix3(RT);
-    this.uAchse.value.copy(LICHT_ZIEL).sub(LICHT_ORT).normalize().applyMatrix3(RT);
-    this.uKern.value.copy(KERN_ZIEL).sub(LICHT_ORT).normalize().applyMatrix3(RT);
-    const Z = this.uZ.value;
-    this.uD0.value = Z.distanceTo(L);
+    this.lage.aktualisiere(RT);
+    const L = this.uL.value, Z = this.uZ.value;
     const dL = this._q.copy(Z).sub(L).normalize();
     const U = this.uU.value.set(-dL.z, 0, dL.x);          // dL × y
     if (U.lengthSq() < 1e-6) U.set(1, 0, 0);
@@ -491,9 +576,6 @@ export class EchtzeitLicht {
     const hu = 0.0495, hv = 0.0725 * Math.abs(V.y) + 0.047 * Math.sqrt(Math.max(0, 1 - V.y * V.y)) + 0.002;
     U.multiplyScalar(hu); V.multiplyScalar(hv);
     this.uZelle.value = (2 * hu / this.raster) * (2 * hv / this.raster);
-    const cos = -dL.y;
-    this.uCos.value = cos;
-    this.uStark.value = THREE.MathUtils.smoothstep(cos, 0.08, 0.22);
     // Steht alles still, muss nicht neu gerechnet werden (spart am Handy Strom); die Mittelung läuft noch kurz aus
     const e = RT.elements, a = glas.uA.value;
     const marke = [e[0], e[1], e[2], e[3], e[4], e[5], glas.uD.value, a.x, a.y, a.z, a.w, glas.uFluessig.value,
@@ -519,6 +601,7 @@ export class EchtzeitLicht {
     r.setRenderTarget(ziel);
     r.setClearColor(this._farbe, alpha);
     this.tex.value = this.verlauf[this.jetzt].texture;
+    this.zaehler++;
   }
 
   /** Lichttextur auslesen (nur für Eichung und Sichtung): Float32Array RGBA, pixel². */
@@ -530,10 +613,19 @@ export class EchtzeitLicht {
     return aus;
   }
 
+  /** Gibt alles frei, was am Strahlenraster hängt: Flecken, Rechenschritte und die Speicher der Strahlen (beim
+   *  Wechsel auf das kleine Raster blieben sie sonst auf der Grafikkarte liegen). */
   raeume() {
+    if (!this.szene) return;
     for (const netz of this.szene.children) { netz.geometry.dispose(); netz.material.dispose(); }
     this.verfolgen.dispose();
     this.formen.dispose();
+    for (const knoten of this.speicher || []) {
+      if (knoten.value && typeof knoten.value.dispose === 'function') knoten.value.dispose();
+      if (typeof knoten.dispose === 'function') knoten.dispose();
+    }
+    this.speicher = [];
+    this.szene = null;
   }
 
   dispose() {

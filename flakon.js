@@ -42,7 +42,7 @@ let gehalten = false, ziehen = false, geste = '', letzteX = 0, letzteY = 0, star
 let gierTempo = 0, gierSchwung = 0, letzteZeit = 0, letzteBewegung = 0;
 let qAlt = [0, 0, 0, 1], omegaAlt = [0, 0, 0], gerechnet = 0;
 let pixelDichte = 1, dichteAbzug = 0, sparstufe = 0, ausgabe = null;
-// Echtzeit-Licht auf dem Teller (§6.9): lichtTakt 1 = jedes Bild, 2 = jedes zweite; lichtStufe 0 voll, 1 klein, 2 aus
+// Echtzeit-Licht auf dem Tuch (§6.9, §6.10): lichtTakt 1 = jedes Bild, 2 = jedes zweite; lichtStufe 0 voll, 1 klein, 2 aus
 let lichtTakt = 1, lichtStufe = 0, bildNr = 0;
 // Zoom der Kamera (1 bis 3): ein Ausschnitt des vollen Bildes; zoomX/zoomY = linke obere Ecke des Ausschnitts (0..1)
 let zoom = 1, zoomX = 0, zoomY = 0;
@@ -61,18 +61,18 @@ function aktualisiere() {
   const q = modell.q;
   gruppe.quaternion.set(q[0], q[1], q[2], q[3]);
   aussehen.glas.aktualisiere(modell, kamera.position);
-  aussehen.teller.setze(gier, Math.hypot(winkelX, winkelZ));
-  if (lichtAn()) aussehen.teller.echt.aktualisiere(aussehen.glas);
+  aussehen.tuch.setze(gier, Math.hypot(winkelX, winkelZ), aussehen.glas);
+  if (lichtAn()) aussehen.tuch.echt.aktualisiere(aussehen.glas);
 }
 
 function lichtAn() {
-  return !!(aussehen && aussehen.teller.echt && aussehen.teller.echt.aktiv);
+  return !!(aussehen && aussehen.tuch.echt && aussehen.tuch.echt.aktiv);
 }
 
 function lichtAus() {
   if (!lichtAn()) return;
-  aussehen.teller.uEcht.value = 0;       // ab jetzt wieder die LuxCore-Bilder
-  aussehen.teller.echt.aktiv = false;    // nicht mehr rechnen; die Lichttextur bleibt (der Shader kennt sie noch)
+  aussehen.tuch.uEcht.value = 0;       // ab jetzt wieder die LuxCore-Bilder
+  aussehen.tuch.echt.aktiv = false;    // nicht mehr rechnen; die Lichttextur bleibt (der Shader kennt sie noch)
 }
 
 function schrittMitBewegung() {
@@ -126,10 +126,22 @@ const kontroller = {
   zeigeFluessigkeit(an) { aussehen.glas.uFluessig.value = an ? 1 : 0; },
   zeigeEtikett(an) { etikettAn = !!an; aussehen.etikett.visible = etikettAn && flakonAn; aussehen.glas.uEtikett.value = an ? 1 : 0; },
   tellerLicht: () => lichtAn() ? 'echtzeit' : 'bilder',
-  lichtBild: () => lichtAn() ? aussehen.teller.echt.lies() : null,   // nur für Eichung und Sichtung
+  lichtBild: () => lichtAn() ? aussehen.tuch.echt.lies() : null,   // nur für Eichung und Sichtung
+  unterlage: () => 'tuch',
+  tuchHoehe: (x, z) => aussehen.tuch.hoehe(x, z),
+  tuchLicht: (x, z) => lichtAn() ? aussehen.tuch.bestrahlung(x, z) : null,
+  // nur für Eichung: Werte des Tuch-Materials setzen
+  tuchWerte(w) {
+    for (const [n, v] of Object.entries(w)) {
+      const u = aussehen.tuch[n];
+      if (u.value && u.value.isColor) u.value.set(v);
+      else if (u.value && u.value.fromArray) u.value.fromArray(v);
+      else u.value = v;
+    }
+  },
   lichtStufe(n) { if (n >= 2) { lichtStufe = 2; lichtAus(); } else if (n === 1 && lichtAn()) lichtKlein(); },   // nur für Sichtung: Stufen der Selbstanpassung
-  lichtWerte(w) { if (lichtAn()) for (const [n, v] of Object.entries(w)) aussehen.teller.echt[n].value = v; },
-  // Nur das Zeichnen des Flakons aus/ein; das Licht auf dem Teller wird weiter gerechnet, als wäre er da
+  lichtWerte(w) { if (lichtAn()) for (const [n, v] of Object.entries(w)) aussehen.tuch.echt[n].value = v; },
+  // Nur das Zeichnen des Flakons aus/ein; das Licht auf dem Tuch wird weiter gerechnet, als wäre er da
   zeigeFlakon(an) {
     flakonAn = !!an;
     aussehen.glasMesh.visible = flakonAn;
@@ -202,7 +214,10 @@ function zeiger() {
   });
   canvas.addEventListener('pointermove', e => {
     const f = finger.get(e.pointerId);
-    if (f) { f.x = e.clientX; f.y = e.clientY; }
+    // Nur Zeiger, die auf der Fläche gedrückt wurden und noch gedrückt sind, bewegen etwas: eine Maus, die ohne
+    // Taste über das Fenster streicht (auch während einer anderen Geste), zählt nicht mit
+    if (!f || (e.pointerType === 'mouse' && e.buttons === 0)) return;
+    f.x = e.clientX; f.y = e.clientY;
     if (pinch && finger.size >= 2) {
       const [a, b] = [...finger.values()];
       const [fx, fy] = fensterStelle({ clientX: (a.x + b.x) / 2, clientY: (a.y + b.y) / 2 });
@@ -254,6 +269,9 @@ function zeiger() {
   };
   canvas.addEventListener('pointerup', ende);
   canvas.addEventListener('pointercancel', ende);
+  // Geht das Loslassen verloren (die Zeiger-Bindung endet ohne pointerup), endet die Geste trotzdem und die
+  // Flasche federt zurück
+  canvas.addEventListener('lostpointercapture', e => { if (finger.has(e.pointerId)) ende(e); });
   // Strg + Mausrad und Trackpad-Pinch (meldet Chrome als Rad mit Strg) zoomen die Kamera, nicht die Seite
   canvas.addEventListener('wheel', e => {
     if (!e.ctrlKey) return;
@@ -288,7 +306,7 @@ function fpsAnpassen(schnitt) {
     ausgabe = null;                       // ohne Nachglättung direkt zeichnen (MSAA bleibt)
   } else if (lichtAn()) {
     lichtStufe = 2;
-    lichtAus();                           // letzte Stufe: Tellerlicht wieder aus den LuxCore-Bildern
+    lichtAus();                           // letzte Stufe: Licht auf dem Tuch wieder aus den LuxCore-Bildern
   }
 }
 
@@ -296,13 +314,13 @@ function fpsAnpassen(schnitt) {
 function lichtKlein() {
   lichtStufe = 1;
   lichtTakt = 2;
-  const echt = aussehen.teller.echt;
+  const echt = aussehen.tuch.echt;
   if (echt.raster > 128) echt.setzeRaster(128);
   echt.uMisch.value = 0.7;
 }
 
 function zeichne() {
-  if (lichtAn() && bildNr++ % lichtTakt === 0) aussehen.teller.echt.rechne();
+  if (lichtAn() && bildNr++ % lichtTakt === 0) aussehen.tuch.echt.rechne();
   if (ausgabe) ausgabe.render();
   else renderer.render(szene, kamera);
 }
@@ -335,7 +353,7 @@ async function main() {
   kamera.position.fromArray(k.position);
   kamera.lookAt(new THREE.Vector3().fromArray(k.ziel));
   // Alles Licht kommt aus der HDR-Umgebung; der Spot der Szene steckt im Glas-Shader (glas.js SPOT_RICHTUNG)
-  // und in den gebackenen Tellerbildern.
+  // und im Licht auf dem Tuch (tuch.js, tellerlicht.js).
   gruppe = new THREE.Group();
   szene.add(gruppe);
   const feldDaten = new Float32Array(feld);
@@ -349,14 +367,14 @@ async function main() {
   const handy = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 700;
   const aussehenNeu = await baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDaten, hdr,
     { renderer, raster: webgpu && !params.has('bilder') ? (Number(params.get('raster')) || (handy ? 128 : 256)) : 0,
-      pixel: Number(params.get('lichtpx')) || (handy ? 512 : 1024), halb });
+      pixel: Number(params.get('lichtpx')) || (handy ? 768 : 1024), halb, flach: params.has('flach') });
   // Während der Arbeiter die Tabelle rechnet: die Shader in Portionen vorbereiten (erst das Tellerlicht, dann die
   // Szene), damit das erste Bild die Seite nicht am Stück blockiert (Gegenprüfung T2n, Befund 3)
   const pause = () => new Promise(r => setTimeout(r, 0));
   await pause();
-  if (aussehenNeu.teller.echt) {
-    aussehenNeu.teller.echt.aktualisiere(aussehenNeu.glas);
-    aussehenNeu.teller.echt.rechne();
+  if (aussehenNeu.tuch.echt) {
+    aussehenNeu.tuch.echt.aktualisiere(aussehenNeu.glas);
+    aussehenNeu.tuch.echt.rechne();
     await pause();
   }
   resize();
