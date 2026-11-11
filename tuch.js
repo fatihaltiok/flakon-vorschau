@@ -1,13 +1,15 @@
 // web/tuch.js — das gefaltete Satintuch unter dem Flakon (Vertrag §6.10).
 // Ein Höhenfeld (tuch_hoehe.bin, aus der Stoffsimulation) ist die einzige Form des Tuchs: daraus entsteht das
-// gezeichnete Netz, daran enden die Lichtstrahlen (tellerlicht.js), und der Testzugang fragt es ab. Das Tuch dreht
-// und kippt mit dem Flakon; das Licht steht in der Welt fest.
+// gezeichnete Netz, daran enden die Lichtstrahlen (tellerlicht.js), und der Testzugang fragt es ab. Das Tuch liegt
+// fest in der Welt wie das Licht und die Kamera (Vertrag §6.11); nur die Flasche dreht und kippt. Alle Koordinaten
+// hier sind Weltkoordinaten (Ursprung Mitte der Standfläche in Ruhe, +Y oben).
 // Satin: dunkelbrauner Grund, darüber ein anisotroper Glanz (glatt entlang der Fäden, breit quer dazu) vom Hauptlicht
-// und von den Softboxen der Umgebung — er liegt als warmes Band auf den Faltenkämmen und wandert beim Drehen.
+// und von den Softboxen der Umgebung — er liegt als warmes Band auf den Faltenkämmen und steht still.
 // Licht: unter WebGPU die Echtzeit-Rechnung (Schatten, gebündeltes Licht, Einfallswinkel je Faltenflanke), sonst acht
-// LuxCore-Bilder der Bestrahlung auf dem Tuch (alle 45°, in Tuchkoordinaten), zwischen zwei Lagen überblendet.
+// LuxCore-Bilder der Bestrahlung auf dem Tuch (Flasche bei gier 0°, 45° … 315°, in Weltkoordinaten), zwischen zwei
+// Lagen nach gier überblendet.
 import * as THREE from 'three';
-import { Fn, cameraPosition, float, max, mix, modelWorldMatrixInverse, pmremTexture, positionLocal, smoothstep, step,
+import { Fn, cameraPosition, float, max, mix, pmremTexture, positionLocal, smoothstep, step,
   texture, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
 import { EchtzeitLicht, LICHT_BREITE, Lichtlage } from './tellerlicht.js';
 
@@ -17,7 +19,7 @@ const HINTERGRUND = 0x141418;
 
 export class Tuch {
   /** info: aussehen.json → tuch; hoehen: Uint16Array (oder null); normalTex: tuch_normal.png; bilder: 8 Lichtbilder;
-   *  hdr: Umgebung; glas: Glas-Objekt (Drehlage der Flasche); opt.flach: Höhe überall 0 (nur Testzweck). */
+   *  hdr: Umgebung; opt.flach: Höhe überall 0 (nur Testzweck). */
   constructor(info, hoehen, normalTex, bilder, hdr, glas, opt = {}) {
     const n = this.n = info.pixel, B = this.breite = info.breite_m;
     this.flach = !!opt.flach;
@@ -37,7 +39,7 @@ export class Tuch {
     /** Höhe an der Stelle (x, z) im Shader — dieselben Werte wie hoehe(x, z) */
     this.hoeheAn = (x, z) => texture(hTex, vec2(x.div(B).add(0.5), z.div(B).add(0.5))).level(0).x;
     const nTex = texture(normalTex);
-    /** Tuchnormale (Flaschenkoordinaten) aus der Normalen-Textur, die aus demselben Höhenfeld gerechnet ist */
+    /** Tuchnormale (Weltkoordinaten) aus der Normalen-Textur, die aus demselben Höhenfeld gerechnet ist */
     this.normalAn = (x, z) => {
       const t = nTex.sample(vec2(x.div(B).add(0.5), z.div(B).add(0.5)));
       // außerhalb des Höhenfelds ist das Tuch flach (die Textur wiederholt sich dort, für die Webstruktur)
@@ -73,7 +75,8 @@ export class Tuch {
     this.uRauQuer = uniform(0.5);     // Rauheit quer dazu
     this.uWeb = uniform(1.0);         // Sichtbarkeit der Webstruktur
     this.uHintergrund = uniform(new THREE.Color(HINTERGRUND));
-    this.uR = glas.uR;
+    // Wo die Flasche gerade steht (Welt-x, -z ihres Bodenmittelpunkts): dort ist das Licht der Umgebung verdeckt
+    this.uOrt = uniform(new THREE.Vector2());
 
     const gebackenAn = (x, z) => {
       const u = vec2(x.div(LICHT_BREITE).add(0.5), z.div(LICHT_BREITE).add(0.5));   // Zeile 0 der Datei (oben) = −z
@@ -84,14 +87,15 @@ export class Tuch {
      *  aus der Echtzeit-Rechnung oder aus den Bildern */
     const licht = (x, z, N, falten) => {
       const P = vec3(x, this.hoeheAn(x, z), z);
-      const zumLicht = this.lage.uL.sub(P);
+      const zumLicht = this.lage.uLw.sub(P);
       const abstand = zumLicht.length(), l = zumLicht.div(abstand), nl = N.dot(l).max(0);
       // Ersatz: die Bilder enthalten Einfallswinkel, Schatten und gebündeltes Licht der aufrechten Lage; gekippt
       // ein schlichter Lichtkegel mit weichem Schatten des Flakons
       const fern = this.lage.uD0.mul(this.lage.uD0).div(abstand.mul(abstand));
-      const fuss = vec2(x, z).sub(l.xz.mul(float(0.05).div(l.y.max(0.2)))).length();
-      const weich = float(1).sub(smoothstep(0.06, 0.02, vec2(x, z).length().min(fuss)).mul(0.75));
-      const schlicht = fern.mul(this.lage.kegelAn(l.negate())).mul(this.lage.uStark).mul(weich).mul(1.4);
+      const umFlasche = vec2(x, z).sub(this.uOrt);
+      const fuss = umFlasche.sub(l.xz.mul(float(0.05).div(l.y.max(0.2)))).length();
+      const weich = float(1).sub(smoothstep(0.06, 0.02, umFlasche.length().min(fuss)).mul(0.75));
+      const schlicht = fern.mul(this.lage.kegelAn(l.negate(), true)).mul(weich).mul(1.4);
       const gebacken = gebackenAn(x, z);
       const bildDiffus = mix(vec3(schlicht.mul(nl)).add(0.01), gebacken, this.uKlar);
       const bildStrahl = mix(schlicht, gebacken.g.div(nl.max(0.25)).min(3.0), this.uKlar);
@@ -116,7 +120,7 @@ export class Tuch {
       return D.div(lh.mul(lh).max(0.05).mul(4));
     };
     const ausblenden = r => smoothstep(0.24, 0.62, r);
-    /** Farbe des Tuchs an der Stelle P (Flaschenkoordinaten), gesehen aus Richtung V (zum Auge). genau = false:
+    /** Farbe des Tuchs an der Stelle P (Weltkoordinaten), gesehen aus Richtung V (zum Auge). genau = false:
      *  für den Blick durch das Glas (ohne Faltenschatten, ohne Umgebungsglanz, ohne Webstruktur). */
     this.farbeAn = (P, V, genau = true) => {
       const x = P.x, z = P.z;
@@ -136,12 +140,12 @@ export class Tuch {
       if (genau) {
         // Softboxen: breite, weiche Spiegelung der Umgebung, zum Streifwinkel hin stärker (Satin), in den Tälern
         // und unter dem Flakon schwächer
-        const Rw = this.uR.mul(V.negate().reflect(N));
+        const Rw = V.negate().reflect(N);
         const streif = float(1).sub(nv).pow(3).mul(0.85).add(0.15);
-        const offen = N.y.mul(N.y).mul(smoothstep(0.02, 0.07, vec2(x, z).length()).mul(0.6).add(0.4));
+        const offen = N.y.mul(N.y).mul(smoothstep(0.02, 0.07, vec2(x, z).sub(this.uOrt).length()).mul(0.6).add(0.4));
         const umgebung = pmremTexture(hdr, Rw, float(0.42)).mul(this.uGlanzFarbe).mul(streif).mul(offen).mul(this.uUmgebung)
           .mul(web.mul(0.6).add(1));
-        const himmel = pmremTexture(hdr, this.uR.mul(N), float(1.0)).mul(this.uFarbe).mul(offen).mul(1.2);
+        const himmel = pmremTexture(hdr, N, float(1.0)).mul(this.uFarbe).mul(offen).mul(1.2);
         farbe = farbe.add(umgebung).add(himmel);
       }
       return mix(farbe, this.uHintergrund, ausblenden(vec2(x, z).length()));
@@ -171,8 +175,8 @@ export class Tuch {
     geo.setIndex(idx);
     const mat = new THREE.MeshBasicNodeMaterial();
     mat.colorNode = Fn(() => {
-      const kam = modelWorldMatrixInverse.mul(vec4(cameraPosition, 1)).xyz;
-      return this.farbeAn(positionLocal, kam.sub(positionLocal).normalize(), true);
+      // Das Netz liegt unbewegt in der Welt: Netz- und Weltkoordinaten sind dieselben
+      return this.farbeAn(positionLocal, cameraPosition.sub(positionLocal).normalize(), true);
     })();
     mat.side = THREE.DoubleSide;
     this.mesh = new THREE.Mesh(geo, mat);
@@ -185,7 +189,7 @@ export class Tuch {
     this.karteBreite = 0.32;
   }
 
-  /** Höhe des Tuchs (m) an der Stelle (x, z) in Flaschenkoordinaten; außerhalb des Höhenfelds 0. */
+  /** Höhe des Tuchs (m) an der Stelle (x, z) in Weltkoordinaten; außerhalb des Höhenfelds 0. */
   hoehe(x, z) {
     const n = this.n, u = (x / this.breite + 0.5) * n - 0.5, v = (z / this.breite + 0.5) * n - 0.5;
     if (!(u > -1 && v > -1 && u < n && v < n)) return 0;
@@ -201,7 +205,7 @@ export class Tuch {
     this.uEcht.value = 1;
   }
 
-  /** Je Bild: Drehung (für die Wahl der zwei Lichtbilder), Neigung, Lage des Lichts zur Flasche. */
+  /** Je Bild: Drehung der Flasche (für die Wahl der zwei Lichtbilder), Neigung, Lage des Lichts zur Flasche. */
   setze(gier, neigung, glas) {
     const w = ((gier * 180 / Math.PI) % 360 + 360) % 360;
     const i = Math.floor(w / 45) % 8, j = (i + 1) % 8;
@@ -213,10 +217,11 @@ export class Tuch {
     this.uMisch.value = (w % 45) / 45;
     const grad = neigung * 180 / Math.PI;
     this.uKlar.value = THREE.MathUtils.clamp((14 - grad) / 6, 0, 1);
-    this.lage.aktualisiere(glas.uRT.value);
+    this.lage.aktualisiere(glas.uRT.value, glas.uV.value);
+    this.uOrt.value.set(glas.uV.value.x, glas.uV.value.z);
   }
 
-  /** Bestrahlung an der Stelle (x, z) aus der aktuellen Lichtrechnung (Einfallswinkel, Schatten, gebündeltes Licht):
+  /** Bestrahlung an der Stelle (x, z) der Welt aus der aktuellen Lichtrechnung (Einfallswinkel, Schatten, gebündeltes Licht):
    *  die Formel des Bildes wird in eine kleine Karte gezeichnet und ausgelesen; neu nur, wenn das Licht neu
    *  gerechnet wurde. */
   async bestrahlung(x, z) {

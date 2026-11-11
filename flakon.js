@@ -46,7 +46,28 @@ let pixelDichte = 1, dichteAbzug = 0, sparstufe = 0, ausgabe = null;
 let lichtTakt = 1, lichtStufe = 0, bildNr = 0;
 // Zoom der Kamera (1 bis 3): ein Ausschnitt des vollen Bildes; zoomX/zoomY = linke obere Ecke des Ausschnitts (0..1)
 let zoom = 1, zoomX = 0, zoomY = 0;
-let flakonAn = true, etikettAn = true;
+let flakonAn = true, etikettAn = true, verschlussAn = true;
+// Lage der Flasche (Vertrag §6.11): Welt = T(k)·R·T(−k)·Ry(gier)·Flasche = R·Ry(gier)·Flasche + versatz mit
+// versatz = k − R·k; k ist der Punkt der Standkante (Radius 32,5 mm), zu dem die Flasche hinkippt. Das Tuch liegt fest.
+const STAND_R = 0.0325;
+const versatz = new THREE.Vector3();
+// Kippgrenze: gemessen an allen Ecken des Glases gegen das Höhenfeld des Tuchs (alle Richtungen, alle Drehlagen).
+// Das Tuch selbst berührt die gekippte Flasche bis 60° nirgends. Die Lage-Formel (R = Rz·Rx) verdreht die Flasche
+// bei schrägen Kipprichtungen aber leicht um ihre Achse; die Standkante sinkt dort etwas unter die Ebene des Tuchs:
+// bei 30° höchstens 0,04 mm, bei 42° 0,24 mm, bei 48° 0,48 mm, bei 49° 0,54 mm (erlaubt: 0,5 mm). Finger und
+// Maus kippen deshalb weich begrenzt bis 40° (ab 36° läuft die Neigung ohne Ruck gegen die Grenze; mit dem
+// Überschwingen des Federzugs unter 42°), halteLage und fahreNeigung höchstens 48°.
+const KIPP_GRENZE = 40 * Math.PI / 180, KIPP_KNIE = 4 * Math.PI / 180, KIPP_HART = 48 * Math.PI / 180;
+let rohX = 0, rohZ = 0;      // ungebremstes Ziel der Kippgeste
+// Eigendrehung (§6.11): eine Umdrehung in 30 s nach der Uhrzeit; ruht in jeder Geste, setzt 2,5 s nach dem Loslassen
+// und dem Auslaufen des Schwungs wieder ein und läuft in 1,2 s weich an. Mit ?test aus, bis eigendrehung(true);
+// bei „Bewegung reduzieren“ immer aus.
+const EIGEN_TEMPO = 2 * Math.PI / 30, EIGEN_PAUSE = 2500, EIGEN_ANLAUF = 1200;
+const wenigBewegung = matchMedia('(prefers-reduced-motion: reduce)');
+let eigenGewollt = !params.has('test'), eigenAb = -1e9, eigenRest = 0;
+const eigenAn = () => eigenGewollt && !wenigBewegung.matches;
+/** Jede Geste (Drehen, Kippen, Zoomen) hält die Eigendrehung an; die Pause zählt ab dem letzten Aufruf. */
+function eigenRuhe() { eigenAb = performance.now() + EIGEN_PAUSE; }
 const finger = new Map();
 let pinch = null, tippZeit = 0, tippX = 0, tippY = 0, druckZeit = 0, druckWeg = 0;
 let bereitAufloesen, bereitAblehnen;
@@ -57,10 +78,38 @@ function qAktuell() {
   return qMal(qVonWinkel(winkelX, winkelZ), qy);
 }
 
+/** Wirkliche Neigung der Flaschenachse gegen die Senkrechte bei den Winkeln (x, z): R = Rz·Rx, cos = cos x · cos z */
+const neigungVon = (x, z) => Math.acos(THREE.MathUtils.clamp(Math.cos(x) * Math.cos(z), -1, 1));
+
+/** Verkleinert die Winkel (x, z) so, dass die Neigung höchstens `grenze` ist; knie > 0: weicher Übergang, die
+ *  Neigung läuft ab grenze − knie ohne Knick gegen die Grenze. Liefert [x, z]. */
+function begrenzeNeigung(x, z, grenze, knie = 0) {
+  const m = neigungVon(x, z);
+  if (m <= grenze - knie) return [x, z];
+  const ziel = knie > 0 ? grenze - knie * Math.exp(-(m - (grenze - knie)) / knie) : grenze;
+  let f = ziel / m;
+  for (let i = 0; i < 4; i++) f *= ziel / Math.max(1e-9, neigungVon(x * f, z * f));
+  return [x * f, z * f];
+}
+
+/** Verschiebung der Flasche aus der Kipp-Drehung: der Punkt der Standkante in Kipprichtung bleibt liegen (§6.11). */
+const _qKipp = new THREE.Quaternion(), _auf = new THREE.Vector3(), _k = new THREE.Vector3(), _rk = new THREE.Vector3();
+function setzeVersatz() {
+  const q = qVonWinkel(winkelX, winkelZ);
+  _qKipp.set(q[0], q[1], q[2], q[3]);
+  _auf.set(0, 1, 0).applyQuaternion(_qKipp);
+  const w = Math.hypot(_auf.x, _auf.z);
+  if (w < 1e-9) { versatz.set(0, 0, 0); return; }
+  _k.set(_auf.x / w * STAND_R, 0, _auf.z / w * STAND_R);
+  versatz.copy(_k).sub(_rk.copy(_k).applyQuaternion(_qKipp));
+}
+
 function aktualisiere() {
   const q = modell.q;
+  setzeVersatz();
   gruppe.quaternion.set(q[0], q[1], q[2], q[3]);
-  aussehen.glas.aktualisiere(modell, kamera.position);
+  gruppe.position.copy(versatz);
+  aussehen.glas.aktualisiere(modell, kamera.position, versatz);
   aussehen.tuch.setze(gier, Math.hypot(winkelX, winkelZ), aussehen.glas);
   if (lichtAn()) aussehen.tuch.echt.aktualisiere(aussehen.glas);
 }
@@ -91,7 +140,10 @@ const kontroller = {
   gierGrad: () => gier * 180 / Math.PI,
   halteLage(gx, gz, g = 0) {
     gehalten = true; ziehen = false;
-    winkelX = gx * Math.PI / 180; winkelZ = gz * Math.PI / 180; gier = g * Math.PI / 180;
+    // Lage nach §6.11 (Drehpunkt an der Standkante); über 48° Neigung tauchte die Standkante ins Tuch, dort ist Schluss
+    [winkelX, winkelZ] = begrenzeNeigung(gx * Math.PI / 180, gz * Math.PI / 180, KIPP_HART);
+    gier = g * Math.PI / 180;
+    rohX = rohZ = zielX = zielZ = 0;
     federX = federZ = gierSchwung = gierTempo = 0;
     qAlt = qAktuell(); omegaAlt = [0, 0, 0];
     modell.setzeLage(qAlt);
@@ -107,8 +159,8 @@ const kontroller = {
     gehalten = true;
     federX = federZ = gierSchwung = 0;
     const startx = winkelX, startz = winkelZ;
-    const zielx = achse === 'x' ? grad * Math.PI / 180 : winkelX;
-    const zielz = achse === 'z' ? grad * Math.PI / 180 : winkelZ;
+    const [zielx, zielz] = begrenzeNeigung(achse === 'x' ? grad * Math.PI / 180 : winkelX,
+      achse === 'z' ? grad * Math.PI / 180 : winkelZ, KIPP_HART);
     const n = Math.max(2, Math.round(sekunden / DT));
     qAlt = qAktuell(); omegaAlt = [0, 0, 0];
     for (let i = 0; i < n; i++) {
@@ -128,8 +180,19 @@ const kontroller = {
   tellerLicht: () => lichtAn() ? 'echtzeit' : 'bilder',
   lichtBild: () => lichtAn() ? aussehen.tuch.echt.lies() : null,   // nur für Eichung und Sichtung
   unterlage: () => 'tuch',
+  // Weltkoordinaten (das Tuch liegt fest, §6.11)
   tuchHoehe: (x, z) => aussehen.tuch.hoehe(x, z),
   tuchLicht: (x, z) => lichtAn() ? aussehen.tuch.bestrahlung(x, z) : null,
+  /** Weltlage eines Flaschenpunkts in der Lage, in der gerade gezeichnet wird */
+  weltpunkt(x, y, z) {
+    const p = new THREE.Vector3(x, y, z).applyQuaternion(gruppe.quaternion).add(gruppe.position);
+    return [p.x, p.y, p.z];
+  },
+  /** Eigendrehung ein/aus (mit ?test anfangs aus); eingeschaltet läuft sie sofort an, ohne die Pause nach einer Geste */
+  eigendrehung(an) { eigenGewollt = !!an; eigenAb = performance.now(); },
+  eigendrehungAn: () => eigenAn(),
+  /** Nur das Zeichnen der Kappe aus/ein; ihr Schatten auf dem Tuch bleibt */
+  zeigeVerschluss(an) { verschlussAn = !!an; aussehen.verschluss.visible = verschlussAn && flakonAn; },
   // nur für Eichung: Werte des Tuch-Materials setzen
   tuchWerte(w) {
     for (const [n, v] of Object.entries(w)) {
@@ -139,21 +202,24 @@ const kontroller = {
       else u.value = v;
     }
   },
+  kappeWerte(w) { for (const [n, v] of Object.entries(w)) aussehen.kappe[n].value = v; },   // nur für Eichung
   lichtStufe(n) { if (n >= 2) { lichtStufe = 2; lichtAus(); } else if (n === 1 && lichtAn()) lichtKlein(); },   // nur für Sichtung: Stufen der Selbstanpassung
   lichtWerte(w) { if (lichtAn()) for (const [n, v] of Object.entries(w)) aussehen.tuch.echt[n].value = v; },
   // Nur das Zeichnen des Flakons aus/ein; das Licht auf dem Tuch wird weiter gerechnet, als wäre er da
   zeigeFlakon(an) {
     flakonAn = !!an;
     aussehen.glasMesh.visible = flakonAn;
-    aussehen.verschluss.visible = flakonAn;
+    aussehen.verschluss.visible = flakonAn && verschlussAn;
     aussehen.etikett.visible = flakonAn && etikettAn;
     aussehen.blasen.visible = flakonAn && sparstufe === 0;
   },
   zoom: () => zoom,
   setzeZoom(z, fx = 0.5, fy = 0.5) { setzeZoom(z, fx, fy, fx, fy); },
   loslassen() {
+    // Nach dem Halten läuft die Eigendrehung (wenn eingeschaltet) gleich wieder an
+    if (gehalten) eigenAb = performance.now();
     gehalten = false;
-    zielX = zielZ = 0;
+    rohX = rohZ = zielX = zielZ = 0;
     gierSchwung = 0;
   },
 };
@@ -196,12 +262,13 @@ function pinchStart() {
   const [fx, fy] = fensterStelle({ clientX: (a.x + b.x) / 2, clientY: (a.y + b.y) / 2 });
   pinch = { abstand: Math.max(10, Math.hypot(a.x - b.x, a.y - b.y)), zoom, bx: zoomX + fx / zoom, by: zoomY + fy / zoom };
   // Zwei Finger zoomen nur: laufende Dreh- oder Kippgeste beenden, die Flasche federt zurück
-  geste = 'zoom'; zielX = zielZ = 0; gierTempo = 0;
+  geste = 'zoom'; rohX = rohZ = zielX = zielZ = 0; gierTempo = 0;
 }
 
 function zeiger() {
   canvas.addEventListener('pointerdown', e => {
     finger.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    eigenRuhe();
     try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* Zeiger schon weg */ }
     if (finger.size === 2) { ziehen = true; pinchStart(); return; }
     if (finger.size > 2) return;
@@ -237,18 +304,21 @@ function zeiger() {
       gierTempo = 0.65 * gierTempo + 0.35 * schritt / dt;
       letzteBewegung = jetzt;
     } else if (geste === 'kippen') {
-      zielZ = THREE.MathUtils.clamp(zielZ - dx * 0.0018, -0.8, 0.8);
-      zielX = THREE.MathUtils.clamp(zielX + dy * 0.0018, -0.8, 0.8);
+      rohZ = THREE.MathUtils.clamp(rohZ - dx * 0.0018, -0.8, 0.8);
+      rohX = THREE.MathUtils.clamp(rohX + dy * 0.0018, -0.8, 0.8);
+      // weich begrenzt: die Flasche kippt über ihre Standkante, aber nie so weit, dass sie ins Tuch taucht
+      [zielX, zielZ] = begrenzeNeigung(rohX, rohZ, KIPP_GRENZE, KIPP_KNIE);
     }
     letzteX = e.clientX; letzteY = e.clientY; letzteZeit = jetzt;
   });
   const ende = e => {
     const dabei = finger.delete(e.pointerId);
+    eigenRuhe();
     if (pinch) {
       // Nach dem Zoomen erst alle Finger heben, dann beginnt eine neue Geste
       if (finger.size < 2) pinch = null;
       if (finger.size === 0) ziehen = false;
-      zielX = zielZ = 0;
+      rohX = rohZ = zielX = zielZ = 0;
       return;
     }
     if (geste === 'zoom') { if (finger.size === 0) ziehen = false; return; }
@@ -265,7 +335,7 @@ function zeiger() {
     if (geste === 'drehen' && performance.now() - letzteBewegung < 150) {
       gierSchwung = THREE.MathUtils.clamp(gierTempo, -5, 5);
     }
-    zielX = zielZ = 0;
+    rohX = rohZ = zielX = zielZ = 0;
   };
   canvas.addEventListener('pointerup', ende);
   canvas.addEventListener('pointercancel', ende);
@@ -276,6 +346,7 @@ function zeiger() {
   canvas.addEventListener('wheel', e => {
     if (!e.ctrlKey) return;
     e.preventDefault();
+    eigenRuhe();
     const [fx, fy] = fensterStelle(e);
     const schritt = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
     setzeZoom(zoom * Math.exp(-schritt * 0.01), zoomX + fx / zoom, zoomY + fy / zoom, fx, fy);
@@ -403,16 +474,28 @@ async function main() {
   document.documentElement.dataset.flakon = 'bereit';
   bereitAufloesen();
 
+  eigenAb = performance.now();        // die Eigendrehung läuft nach dem ersten Bild weich an
   let vorher = performance.now(), rest = 0, fpsStart = vorher, fpsBilder = 0;
   function bild(jetzt) {
-    const vergangen = Math.min(0.05, (jetzt - vorher) / 1000);
+    const echt = Math.max(0, (jetzt - vorher) / 1000), vergangen = Math.min(0.05, echt);
     vorher = jetzt;
     if (!gehalten) {
+      // Eigendrehung nach der Uhrzeit (nicht nach der Bildzahl): der Winkel dieses Bildes wird gleichmäßig auf die
+      // Rechenschritte verteilt, damit das Schwappmodell eine ruhige Drehung sieht. Sie ruht, solange ein Finger
+      // aufliegt oder der Drehschwung ausläuft; die Pause zählt ab dem Ende davon.
+      if (finger.size > 0 || ziehen || pinch || gierSchwung !== 0) eigenRuhe();
+      if (eigenAn()) {
+        const t = THREE.MathUtils.clamp((performance.now() - eigenAb) / EIGEN_ANLAUF, 0, 1);
+        eigenRest += EIGEN_TEMPO * t * t * (3 - 2 * t) * Math.min(0.25, echt);
+      } else eigenRest = 0;
       rest = Math.min(0.05, rest + vergangen);
       const schritte = Math.floor(rest / DT);
       if (schritte > 0) {
         rest -= schritte * DT;
+        const eigenSchritt = eigenRest / schritte;
+        eigenRest = 0;
         for (let i = 0; i < schritte; i++) {
+          gier += eigenSchritt;
           if (gierSchwung !== 0) {
             gier += gierSchwung * DT;
             gierSchwung *= Math.exp(-DT / 0.34);
@@ -427,7 +510,10 @@ async function main() {
         gerechnet += schritte * DT;
       }
       fpsBilder++;
-      if (jetzt - fpsStart >= 2000) {
+      if (jetzt - fpsStart > 4000) {
+        // Fenster zu lang (Tab war im Hintergrund, requestAnimationFrame ruhte): nicht bewerten, neu beginnen
+        fpsStart = jetzt; fpsBilder = 0;
+      } else if (jetzt - fpsStart >= 2000) {
         fpsAnpassen(fpsBilder * 1000 / (jetzt - fpsStart));
         fpsStart = jetzt; fpsBilder = 0;
       }

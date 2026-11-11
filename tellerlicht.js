@@ -8,8 +8,9 @@
 // sind Gauß-Glocken, deren Form aus den Nachbarstrahlen kommt (dicht gebündelt = klein und hell, zerstreut = groß
 // und schwach; auf einer Faltenflanke gestaucht oder gestreckt), sie werden in eine Lichttextur über (x, z)
 // aufsummiert und über wenige Bilder gemittelt. Beim Abfragen kommen der Einfallswinkel zur Tuchnormale und der
-// Schatten der Falten selbst dazu. Alles in Flaschenkoordinaten: das Tuch kippt und dreht mit dem Flakon, das Licht
-// steht in der Welt fest.
+// Schatten der Falten selbst dazu. Tuch und Licht stehen in der Welt fest (Vertrag §6.11), nur die Flasche dreht und
+// kippt: die Strahlen laufen in Flaschenkoordinaten durch den Flakon (das Licht wird dafür in die Flasche
+// umgerechnet), ihre Treffpunkte auf dem Höhenfeld und die Lichttextur liegen in Weltkoordinaten.
 import * as THREE from 'three';
 import { Break, Fn, If, Loop, atan, float, instanceIndex, instancedArray, int, max, min, mix, positionGeometry,
   select, smoothstep, step, texture, texture3D, uniform, uv, varying, vec2, vec3, vec4 } from 'three/tsl';
@@ -117,39 +118,42 @@ export function baueAussenhaut(geo) {
   return tex;
 }
 
-/** Lage des Hauptlichts in Flaschenkoordinaten (das Licht steht in der Welt fest, Flakon und Tuch drehen und kippen).
- *  Gilt für das Echtzeit-Licht und für den Ersatz mit Bildern. */
+/** Lage des Hauptlichts: in der Welt fest (für das Tuch), dazu umgerechnet in Flaschenkoordinaten (für die Strahlen
+ *  durch den Flakon, der dreht und über seine Standkante kippt). Gilt für das Echtzeit-Licht und für den Ersatz
+ *  mit Bildern. */
 export class Lichtlage {
   constructor() {
+    this.uLw = uniform(new THREE.Vector3().copy(LICHT_ORT));  // Lichtort (Welt, fest)
+    this.uAchseW = uniform(new THREE.Vector3().copy(LICHT_ZIEL).sub(LICHT_ORT).normalize());   // Kegelachse (Welt)
     this.uL = uniform(new THREE.Vector3().copy(LICHT_ORT));   // Lichtort (Flasche)
     this.uAchse = uniform(new THREE.Vector3());    // Kegelachse des Spots (Flasche, vom Licht weg)
-    this.uKern = uniform(new THREE.Vector3());     // Achse des hellen Kerns
+    this.uKern = uniform(new THREE.Vector3());     // Achse des hellen Kerns (Flasche)
     this.uD0 = uniform(0.54);                      // Abstand Licht – Rastermitte (Bezug der Helligkeit)
-    this.uStark = uniform(1);                      // 0, wenn das Licht das Tuch nur noch streift (stark gekippt)
+    // Das Tuch liegt fest unter dem Licht (seit T3d kippt es nicht mehr mit): das Licht streift es nie nur noch
+    this.uStark = uniform(1);
     this.mitte = new THREE.Vector3(0, 0.0725, 0);
-    this.cos = 1;
-    this.aktualisiere(new THREE.Matrix3());
+    this.aktualisiere(new THREE.Matrix3(), new THREE.Vector3());
   }
 
-  /** RT: Welt → Flasche (glas.uRT) */
-  aktualisiere(RT) {
-    const L = this.uL.value.copy(LICHT_ORT).applyMatrix3(RT);
-    this.uAchse.value.copy(LICHT_ZIEL).sub(LICHT_ORT).normalize().applyMatrix3(RT);
+  /** RT: Welt → Flasche (glas.uRT), V: Verschiebung der Flasche (glas.uV); Flasche = RT · (Welt − V) */
+  aktualisiere(RT, V) {
+    const L = this.uL.value.copy(LICHT_ORT).sub(V).applyMatrix3(RT);
+    this.uAchse.value.copy(this.uAchseW.value).applyMatrix3(RT);
     this.uKern.value.copy(KERN_ZIEL).sub(LICHT_ORT).normalize().applyMatrix3(RT);
     this.uD0.value = this.mitte.distanceTo(L);
-    this.cos = (L.y - this.mitte.y) / this.uD0.value;
-    this.uStark.value = THREE.MathUtils.smoothstep(this.cos, 0.08, 0.22);
   }
 
-  /** Stärke des Lichts in einer Richtung (vom Licht weg), bezogen auf die Kegelmitte */
-  kegelAn(r) {
-    return r.dot(this.uAchse).sub(KEGEL_COS_AUSSEN).div(KEGEL_COS_INNEN - KEGEL_COS_AUSSEN).clamp(0, 1).pow(KEGEL_HOCH);
+  /** Stärke des Lichts in einer Richtung (vom Licht weg), bezogen auf die Kegelmitte; welt = true: Richtung in
+   *  Weltkoordinaten (Tuch), sonst in Flaschenkoordinaten (Strahlen durch den Flakon) */
+  kegelAn(r, welt = false) {
+    return r.dot(welt ? this.uAchseW : this.uAchse).sub(KEGEL_COS_AUSSEN).div(KEGEL_COS_INNEN - KEGEL_COS_AUSSEN)
+      .clamp(0, 1).pow(KEGEL_HOCH);
   }
 }
 
 export class EchtzeitLicht {
   /** glas: Glas-Objekt aus glas.js (Abstandsfeld und die Uniforms der Flüssigkeit), glasGeo: Netz der Außenhaut,
-   *  tuch: Höhenfeld des Tuchs (hoeheAn(x, z) in Metern, uHmax größte Höhe), lage: Lichtlage,
+   *  tuch: Höhenfeld des Tuchs in Weltkoordinaten (hoeheAn(x, z) in Metern, uHmax größte Höhe), lage: Lichtlage,
    *  raster: Strahlen je Kante (256 am Rechner, 128 am Handy). */
   constructor(renderer, glas, glasGeo, tuch, lage, raster = 256, pixel = 512) {
     const LICHT_PIXEL = this.pixel = pixel;       // Kantenlänge der Lichttextur
@@ -182,6 +186,9 @@ export class EchtzeitLicht {
     // stellt tuch.js ein
     this.uHell = uniform(2.8);
     const kegelAn = r => lage.kegelAn(r);
+    // Flasche → Welt (Drehung und Verschiebung über die Standkante, §6.11)
+    const uR = glas.uR, uVers = glas.uV;
+    const inWelt = p => uR.mul(p).add(uVers);
     const kernAn = r => smoothstep(KERN_AUSSEN, KERN_INNEN, r.dot(this.uKern).clamp(-1, 1).acos()).mul(KERN_FAKTOR).add(1);
     const uNf = glas.uNf, uD = glas.uD, uA = glas.uA, uFl = glas.uFluessig, uEt = glas.uEtikett, uSchlieren = glas.uSchlieren;
 
@@ -246,7 +253,10 @@ export class EchtzeitLicht {
 
     // Erster Treffer eines abwärts laufenden Strahls auf dem Tuch: bis zur Oberkante der Falten springen, dann in
     // gleichen Schritten bis zur Bodenebene, den Übergang durch Halbieren eingrenzen. Flaches Tuch: Schnitt mit y = 0.
-    const tuchTreffer = (start, d) => {
+    // Start und Richtung kommen in Flaschenkoordinaten und werden in die Welt umgerechnet: das Höhenfeld steht fest.
+    // Ergebnis: Treffpunkt in Weltkoordinaten und der Weg dorthin.
+    const tuchTreffer = (startF, dF) => {
+      const start = inWelt(startF).toVar(), d = uR.mul(dF).toVar();
       const ab = d.y.min(-1e-4).negate();
       const t0 = start.y.sub(tuch.uHmax).max(0).div(ab);
       const dt = start.y.max(0).div(ab).sub(t0).div(TREFFER_SCHRITTE).toVar();
@@ -410,7 +420,7 @@ export class EchtzeitLicht {
           });
           If(zustand.greaterThan(1.5), () => {
             zustand.assign(1);
-            If(d.y.lessThan(-0.02), () => {
+            If(uR.mul(d).y.lessThan(-0.02), () => {
               const tr = tuchTreffer(p, d);
               land.assign(tr.ort);
               weg.assign(tr.weg);
@@ -420,7 +430,7 @@ export class EchtzeitLicht {
         });
         bLand.element(instanceIndex).assign(vec4(land.x, land.z, weg, zustand));
         bFarbe.element(instanceIndex).assign(vec4(w, 1));
-        bGerade.element(instanceIndex).assign(vec4(gerade.x, gerade.z, hindernis.sub(gerade).length(),
+        bGerade.element(instanceIndex).assign(vec4(gerade.x, gerade.z, inWelt(hindernis).sub(gerade).length(),
           select(aufKarte(gerade), zustand.min(1), 0.0)));
       })().compute(ANZ);
 
@@ -513,7 +523,7 @@ export class EchtzeitLicht {
     // ---------- Abfrage für Tuch und Glas ----------
     this.tex = texture(this.verlauf[0].texture);
     const spotFarbe = vec3(1.0, 0.97, 0.92);
-    /** Bestrahlung der Tuchstelle (x, z) in Flaschenkoordinaten mit der Tuchnormale N: direktes Licht (Einfallswinkel,
+    /** Bestrahlung der Tuchstelle (x, z) in Weltkoordinaten mit der Tuchnormale N: direktes Licht (Einfallswinkel,
      *  Schatten des Flakons, mit falten = true auch der Schatten der Falten), gebündeltes Licht und Grundlicht je
      *  Tuchfläche; strahl = Licht senkrecht zum Strahl (für den Glanz), l = Richtung zum Licht. */
     this.bestrahlung = (x, z, N, falten = true) => {
@@ -522,7 +532,7 @@ export class EchtzeitLicht {
       // Zeile 0 der Lichttextur liegt bei z = +Rand (Bildschirm-y nach oben beim Aufsummieren)
       const t = this.tex.sample(vec2(x.div(LICHT_BREITE).add(0.5), float(0.5).sub(z.div(LICHT_BREITE))))
         .mul(step(max(x.abs(), z.abs()), LICHT_BREITE / 2));
-      const zumLicht = this.uL.sub(P);
+      const zumLicht = lage.uLw.sub(P);
       const abstand = zumLicht.length(), l = zumLicht.div(abstand);
       const nl = N.dot(l).max(0);
       // Einheit: Bestrahlung senkrecht zum Licht im Abstand der Rastermitte (uD0); so zählen auch die Strahlen
@@ -547,12 +557,12 @@ export class EchtzeitLicht {
           return smoothstep(-0.01, 0.03, klar);
         })();
       }
-      const strahl = fern.mul(kegelAn(l.negate())).mul(float(1).sub(schatten)).mul(this.uStark).mul(frei)
+      const strahl = fern.mul(lage.kegelAn(l.negate(), true)).mul(float(1).sub(schatten)).mul(this.uStark).mul(frei)
         .mul(this.uDirekt).mul(this.uHell);
       const grau = t.r.add(t.g).add(t.b).div(3);
       const kaustik = mix(vec3(grau), t.rgb, this.uSaettigung).max(0).mul(N.y.max(0.2));
       // Licht der Softboxen: überall etwas, unter und dicht am Flakon weniger
-      const grund = this.uGrund.mul(float(1).sub(smoothstep(0.05, 0.02, vec2(x, z).length()).mul(0.55))).mul(this.uHell);
+      const grund = this.uGrund.mul(float(1).sub(smoothstep(0.05, 0.02, vec2(x, z).sub(tuch.uOrt).length()).mul(0.55))).mul(this.uHell);
       return { direkt: spotFarbe.mul(strahl.mul(nl)), kaustik: spotFarbe.mul(kaustik).mul(this.uKaustik).mul(this.uHell),
         grund, strahl, l, nl };
     };
@@ -563,10 +573,10 @@ export class EchtzeitLicht {
     this.zaehler = 0;      // Zahl der gerechneten Lichtbilder (für Abfragen, die das Ergebnis zwischenspeichern)
   }
 
-  /** Lichtlage in Flaschenkoordinaten aus der Lage der Flasche (glas.uRT: Welt → Flasche). */
+  /** Lichtlage in Flaschenkoordinaten aus der Lage der Flasche (glas.uRT: Welt → Flasche, glas.uV: Verschiebung). */
   aktualisiere(glas) {
-    const RT = glas.uRT.value;
-    this.lage.aktualisiere(RT);
+    const RT = glas.uRT.value, vers = glas.uV.value;
+    this.lage.aktualisiere(RT, vers);
     const L = this.uL.value, Z = this.uZ.value;
     const dL = this._q.copy(Z).sub(L).normalize();
     const U = this.uU.value.set(-dL.z, 0, dL.x);          // dL × y
@@ -578,7 +588,7 @@ export class EchtzeitLicht {
     this.uZelle.value = (2 * hu / this.raster) * (2 * hv / this.raster);
     // Steht alles still, muss nicht neu gerechnet werden (spart am Handy Strom); die Mittelung läuft noch kurz aus
     const e = RT.elements, a = glas.uA.value;
-    const marke = [e[0], e[1], e[2], e[3], e[4], e[5], glas.uD.value, a.x, a.y, a.z, a.w, glas.uFluessig.value,
+    const marke = [e[0], e[1], e[2], e[3], e[4], e[5], vers.x, vers.y, vers.z, glas.uD.value, a.x, a.y, a.z, a.w, glas.uFluessig.value,
       glas.uEtikett.value].map(v => v.toFixed(6)).join();
     this.ruhe = marke === this.letzte ? this.ruhe + 1 : 0;
     this.letzte = marke;

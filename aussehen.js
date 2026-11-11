@@ -5,6 +5,7 @@ import { Fn, cameraPosition, float, frontFacing, mix, normalWorld, pmremTexture,
   uniform, vec3 } from 'three/tsl';
 import { Glas, envRichtung } from './glas.js';
 import { Tuch } from './tuch.js';
+import { Kappe } from './kappe.js';
 
 async function bild(url, farbe = false, flipY = true) {
   const t = await new THREE.TextureLoader().loadAsync(url);
@@ -17,8 +18,7 @@ async function bild(url, farbe = false, flipY = true) {
 
 export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDaten, hdr, opt = {}) {
   const d = meta.dateien, basis = './aussehen/';
-  const namen = ['glas_normal', 'glas_rauheit', 'etikett', 'etikett_hoehe', 'etikett_maske',
-    'verschluss_normal', 'verschluss_rauheit'];
+  const namen = ['glas_normal', 'glas_rauheit', 'etikett', 'etikett_hoehe', 'etikett_maske'];
   const tex = {};
   await Promise.all(namen.map(async n => {
     tex[n] = await bild(basis + d[n], n === 'etikett', false);
@@ -58,22 +58,21 @@ export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDate
       ob.material = m;
       etikett = ob;
     } else if (name.includes('verschluss')) {
-      ob.material = new THREE.MeshPhysicalNodeMaterial({ color: 0xb4b4b8, metalness: 1,
-        roughness: 0.25, normalMap: tex.verschluss_normal,
-        normalScale: new THREE.Vector2(0.08, 0.08), anisotropy: 0.75, anisotropyRotation: 0,
-        envMapIntensity: 1.0 });
-      ob.material.roughnessNode = texture(tex.verschluss_rauheit).r.mul(0.3).add(0.15);
-      verschluss = ob;
+      verschluss = ob;      // Material: kappe.js (braucht die Lage der Flasche aus dem Glas, siehe unten)
     }
   });
   gruppe.add(gltf.scene);
 
-  // Glas und Tuch brauchen einander (das Glas zeigt das Tuch gebrochen, das Tuch kennt die Lage der Flasche); die
+  // Glas und Tuch brauchen einander (das Glas zeigt das Tuch gebrochen, das Licht auf dem Tuch kennt die Lage der Flasche); die
   // Shader entstehen erst beim Bauen der Materialien weiter unten
   let tuch;
   const glas = new Glas(feldDaten, hdr, tex, (P, V) => tuch.farbeAn(P, V, false), opt.halb);
   tuch = new Tuch(ti, new Uint16Array(hoehen), tuchNormal, lichtbilder, hdr, glas, { flach: opt.flach });
-  gruppe.add(tuch.mesh);
+  // Das Tuch liegt fest in der Welt (§6.11): es hängt an der Szene, nicht an der Gruppe der Flasche
+  szene.add(tuch.mesh);
+  // Kappe: umlaufend gebürstetes Metall mit Fase und Gebrauchsspuren (§6.11)
+  const kappe = new Kappe(verschluss, hdr, glas);
+  verschluss.material = kappe.material();
   let glasMesh;
   glasGltf.scene.traverse(ob => { if (ob.isMesh) glasMesh = ob; });
   if (!glasMesh) throw new Error('Export glas.glb enthält kein Glasnetz');
@@ -109,5 +108,5 @@ export async function baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDate
   blasen.renderOrder = 4;
   blasen.frustumCulled = false;
   gruppe.add(blasen);
-  return { glas, glasMesh, blasen, tuch, uBlasen, etikett, verschluss };
+  return { glas, glasMesh, blasen, tuch, uBlasen, etikett, verschluss, kappe };
 }

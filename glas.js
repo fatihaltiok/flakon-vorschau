@@ -48,10 +48,13 @@ export const ETIKETT = { r: 0.0341, halb: 54.166 * Math.PI / 180, y0: 0.0174, y1
 export const VERSCHLUSS = { r: 0.017, y0: 0.120, y1: 0.145 };
 
 export class Glas {
-  /** tuchFarbe(P, V): Farbe des Tuchs an der Stelle P der Tuchebene, gesehen aus Richtung V (Flaschenkoordinaten) */
+  /** tuchFarbe(P, V): Farbe des Tuchs an der Stelle P der Tuchebene, gesehen aus Richtung V (Weltkoordinaten: das
+   *  Tuch liegt fest in der Welt, Vertrag §6.11) */
   constructor(feldDaten, hdr, tex, tuchFarbe, halb = false) {
     this.uR = uniform(new THREE.Matrix3());      // Flasche → Welt
     this.uRT = uniform(new THREE.Matrix3());     // Welt → Flasche
+    // Verschiebung der Flasche (§6.11: Kippen über die Standkante): Welt = uR · Flasche + uV
+    this.uV = uniform(new THREE.Vector3());
     this.uKam = uniform(new THREE.Vector3(0, 0.1, 0.6)); // Kamera in Flaschenkoordinaten
     this.uNf = uniform(new THREE.Vector3(0, 1, 0));      // Oberflächennormale (Flasche)
     this.uD = uniform(0.067);
@@ -96,15 +99,18 @@ export class Glas {
       const spot = smoothstep(0.9990, 0.9997, cosS).mul(this.uSpot).mul(float(1).sub(float(rauheit).mul(3)).clamp(0, 1));
       return pmremTexture(hdr, envRichtung(dirW), float(rauheit)).mul(this.uGain).add(spot);
     };
-    // Das Tuch liegt nah: Strahlen nach unten schneiden die Tuchebene y = 0 (Flaschenkoordinaten, das Tuch kippt
-    // mit) statt das Panorama zu fragen (das kennt keine Parallaxe) und sehen dort das Tuch mit seinem Licht.
-    const bodenFarbe = (pF, dF) => {
-      const t = pF.y.max(0).div(dF.y.min(-1e-4).negate());
-      return tuchFarbe(pF.add(dF.mul(t)), dF.negate());
+    // Das Tuch liegt nah: Strahlen nach unten schneiden die Tuchebene y = 0 der Welt (das Tuch liegt fest, die
+    // Flasche kippt darüber) statt das Panorama zu fragen (das kennt keine Parallaxe) und sehen dort das Tuch mit
+    // seinem Licht.
+    const bodenFarbe = (pF, dW) => {
+      const pW = this.uR.mul(pF).add(this.uV);
+      const t = pW.y.max(0).div(dW.y.min(-1e-4).negate());
+      return tuchFarbe(pW.add(dW.mul(t)), dW.negate());
     };
     const env = (pF, dF, rauheit) => {
-      const unten = smoothstep(0.03, -0.03, dF.y);
-      return mix(envFern(this.uR.mul(dF), rauheit), bodenFarbe(pF, dF), unten);
+      const dW = this.uR.mul(dF);
+      const unten = smoothstep(0.03, -0.03, dW.y);
+      return mix(envFern(dW, rauheit), bodenFarbe(pF, dW), unten);
     };
     // Verschluss durch das Glas gesehen: Strahl (Flasche) gegen den Zylinder der Kappe — Unterkante von unten,
     // Mantel von außen. Gebürstetes Metall: verwaschene Spiegelung der Umgebung.
@@ -201,7 +207,7 @@ export class Glas {
     const absorption = l => vec3(...ABSORPTION).mul(l).negate().exp();
     // Gegenlicht: Strahl (Welt) von p in Richtung d trifft das Rechteck? Weicher Rand 2 mm, Abstrahlwinkel begrenzt.
     const gegenlicht = (pF, dF, hofAnteil) => {
-      const p = this.uR.mul(pF), d = this.uR.mul(dF);
+      const p = this.uR.mul(pF).add(this.uV), d = this.uR.mul(dF);
       const t = float(GEGENLICHT.z).sub(p.z).div(d.z.min(-1e-4));
       const h = p.add(d.mul(t));
       // Kern scharf (Rechteck, 2 mm Saum) und ein schwächerer Hof bis 40 mm (LuxCore: Spread 18°, die
@@ -364,14 +370,16 @@ export class Glas {
     return m;
   }
 
-  /** Je Bild: Lage der Flasche (Quaternion des Schwappmodells), Kamera, Flüssigkeitsebene und Wellen. */
-  aktualisiere(modell, kameraWelt) {
+  /** Je Bild: Lage der Flasche (Quaternion des Schwappmodells, dazu die Verschiebung durch den Drehpunkt an der
+   *  Standkante), Kamera, Flüssigkeitsebene und Wellen. Das Schwappmodell kennt nur die Drehung (§6.11). */
+  aktualisiere(modell, kameraWelt, versatz) {
     const q = modell.q;
     const Q = new THREE.Quaternion(q[0], q[1], q[2], q[3]);
     const R = new THREE.Matrix4().makeRotationFromQuaternion(Q);
     this.uR.value.setFromMatrix4(R);
     this.uRT.value.copy(this.uR.value).transpose();
-    this.uKam.value.copy(kameraWelt).applyMatrix3(this.uRT.value);
+    if (versatz) this.uV.value.copy(versatz);
+    this.uKam.value.copy(kameraWelt).sub(this.uV.value).applyMatrix3(this.uRT.value);
     this.uNf.value.set(...modell.nWelt).applyMatrix3(this.uRT.value).normalize();
     this.uD.value = modell.d;
     this.uA.value.set(...modell.A);
