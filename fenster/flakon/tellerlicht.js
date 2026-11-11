@@ -1,5 +1,5 @@
-// web/tellerlicht.js — Echtzeit-Licht auf dem Tuch (Vertrag §6.9, §6.10), nur WebGPU.
-// Ein Rechenshader verfolgt je Bild ein Raster von Strahlen vom Spotlicht (Ort wie szene/flakon.py Licht_Haupt) durch
+// web/tellerlicht.js — Echtzeit-Licht auf dem Tuch (Vertrag §6.9, §6.10, §6.12), unter WebGPU und unter WebGL2.
+// Ein Rechenschritt verfolgt je Bild ein Raster von Strahlen vom Spotlicht (Ort wie szene/flakon.py Licht_Haupt) durch
 // den Flakon: Außenhaut (Tabelle Radius über Winkel und Höhe, aus dem Glasnetz), Glaswand (Abstandsfeld der Höhlung
 // wie in glas.js), Flüssigkeit (dieselbe Fläche wie oberflaecheY, Absorption mit den LuxCore-Werten), wieder Glas und
 // hinaus. Jeder Strahl legt zwei Lichtflecken auf das Tuch: wo er ohne Flakon gelandet wäre (das ergibt den
@@ -11,9 +11,14 @@
 // Schatten der Falten selbst dazu. Tuch und Licht stehen in der Welt fest (Vertrag §6.11), nur die Flasche dreht und
 // kippt: die Strahlen laufen in Flaschenkoordinaten durch den Flakon (das Licht wird dafür in die Flasche
 // umgerechnet), ihre Treffpunkte auf dem Höhenfeld und die Lichttextur liegen in Weltkoordinaten.
+// Zwei Wege für dieselbe Rechnung (§6.12): unter WebGPU laufen Strahlen und Fleckform als Rechenshader über
+// Speicherpuffer (weg = 'rechenshader'); unter WebGL2 als Zeichendurchgänge in Gleitkomma-Zielflächen, ein Bildpunkt
+// je Strahl (weg = 'zeichnen'). Die Bausteine (Strahl, Brechung, Tuchtreffer, Fleckform, Fleck-Material) sind
+// dieselben; die Wege unterscheiden sich nur darin, woher ein Strahl seine Nummer hat und wohin die Werte gehen.
 import * as THREE from 'three/webgpu';
-import { Break, Fn, If, Loop, atan, float, instanceIndex, instancedArray, int, max, min, mix, positionGeometry,
-  select, smoothstep, step, texture, texture3D, uniform, uv, varying, vec2, vec3, vec4 } from 'three/tsl';
+import { Break, Fn, If, Loop, atan, float, instanceIndex, instancedArray, int, ivec2, max, min, mix, outputStruct,
+  positionGeometry, property, screenCoordinate, select, smoothstep, step, texture, texture3D, textureLoad, uniform, uv,
+  varying, vec2, vec3, vec4 } from 'three/tsl';
 import { ABSORPTION, ETIKETT, SDF_N, SDF_S, SDF_U, VERSCHLUSS } from './glas.js';
 
 // Hauptlicht (szene/flakon.py: Ort (0,15, 0,42, 0,38) Blender = (0,15, 0,38, −0,42) Web, zielt auf (0, 0,006, 0),
@@ -118,6 +123,19 @@ export function baueAussenhaut(geo) {
   return tex;
 }
 
+/** Ausgelesene Zielfläche (RGBA, breite × hoehe) in der Zeilenfolge von WebGPU: dort ist Zeile 0 die oberste des
+ *  Bildes, WebGL liest von unten nach oben. Unter WebGL werden die Zeilen an Ort und Stelle umgedreht. */
+export function zeilenWieWebGPU(renderer, daten, breite, hoehe) {
+  if (renderer.backend.isWebGPUBackend === true) return daten;
+  const n = breite * 4, zeile = daten.slice(0, n);
+  for (let o = 0, u = hoehe - 1; o < u; o++, u--) {
+    zeile.set(daten.subarray(o * n, o * n + n));
+    daten.copyWithin(o * n, u * n, u * n + n);
+    daten.set(zeile, u * n);
+  }
+  return daten;
+}
+
 /** Lage des Hauptlichts: in der Welt fest (für das Tuch), dazu umgerechnet in Flaschenkoordinaten (für die Strahlen
  *  durch den Flakon, der dreht und über seine Standkante kippt). Gilt für das Echtzeit-Licht und für den Ersatz
  *  mit Bildern. */
@@ -154,11 +172,14 @@ export class Lichtlage {
 export class EchtzeitLicht {
   /** glas: Glas-Objekt aus glas.js (Abstandsfeld und die Uniforms der Flüssigkeit), glasGeo: Netz der Außenhaut,
    *  tuch: Höhenfeld des Tuchs in Weltkoordinaten (hoeheAn(x, z) in Metern, uHmax größte Höhe), lage: Lichtlage,
-   *  raster: Strahlen je Kante (256 am Rechner, 128 am Handy). */
+   *  raster: Strahlen je Kante (256 am Rechner, 128 am Handy). Der Weg richtet sich nach dem Renderer:
+   *  WebGPU → Rechenshader, WebGL2 → Zeichendurchgänge (braucht EXT_color_buffer_float; das prüft flakon.js). */
   constructor(renderer, glas, glasGeo, tuch, lage, raster = 256, pixel = 512) {
     const LICHT_PIXEL = this.pixel = pixel;       // Kantenlänge der Lichttextur
     this.renderer = renderer;
     this.aktiv = true;
+    const zeichnen = renderer.backend.isWebGPUBackend !== true;
+    this.weg = zeichnen ? 'zeichnen' : 'rechenshader';
     const tab = baueAussenhaut(glasGeo);
     this.tabelle = tab;
     const sdfTex = glas.sdfTex;
@@ -286,19 +307,12 @@ export class EchtzeitLicht {
     this.setzeRaster = N => {
       const ANZ = N * N;
       this.raster = N;
-      // ---------- Speicher ----------
-      if (this.szene) this.raeume();                 // alte Speicher, Rechenschritte und Flecken freigeben
-      const bLand = instancedArray(ANZ, 'vec4');     // x, z des Auftreffpunkts, Weg vom Austritt, Zustand (2 = Licht)
-      const bFarbe = instancedArray(ANZ, 'vec4');    // Gewicht je Farbe
-      const bGerade = instancedArray(ANZ, 'vec4');   // x, z ohne Flakon, Weg vom Hindernis, 1 = verdeckt
-      const kA = instancedArray(ANZ, 'vec4'), kB = instancedArray(ANZ, 'vec4'), kC = instancedArray(ANZ, 'vec4');
-      const sA = instancedArray(ANZ, 'vec4'), sB = instancedArray(ANZ, 'vec4');
-      this.speicher = [bLand, bFarbe, bGerade, kA, kB, kC, sA, sB];
+      if (this.szene) this.raeume();                 // alte Speicher, Zielflächen, Rechenschritte und Flecken freigeben
 
-      // ---------- Rechenschritt 1: Strahlen verfolgen ----------
-      this.verfolgen = Fn(() => {
-        const i = int(instanceIndex);
-        const iy = i.div(N), ix = i.sub(iy.mul(N));
+      // ---------- Baustein 1: ein Strahl (Spalte ix, Zeile iy des Rasters) ----------
+      // Ergebnis: land = x, z des Auftreffpunkts, Weg vom Austritt, Zustand (2 = Licht); farbe = Gewicht je Farbe;
+      // gerade = x, z ohne Flakon, Weg vom Hindernis, 1 = verdeckt
+      const spur = (ix, iy) => {
         const fx = float(ix).add(0.5).div(N).mul(2).sub(1), fy = float(iy).add(0.5).div(N).mul(2).sub(1);
         const o = this.uL;
         const d = this.uZ.add(this.uU.mul(fx)).add(this.uV.mul(fy)).sub(o).normalize().toVar();
@@ -428,13 +442,13 @@ export class EchtzeitLicht {
             });
           });
         });
-        bLand.element(instanceIndex).assign(vec4(land.x, land.z, weg, zustand));
-        bFarbe.element(instanceIndex).assign(vec4(w, 1));
-        bGerade.element(instanceIndex).assign(vec4(gerade.x, gerade.z, inWelt(hindernis).sub(gerade).length(),
-          select(aufKarte(gerade), zustand.min(1), 0.0)));
-      })().compute(ANZ);
+        return { land: vec4(land.x, land.z, weg, zustand), farbe: vec4(w, 1),
+          gerade: vec4(gerade.x, gerade.z, inWelt(hindernis).sub(gerade).length(), select(aufKarte(gerade), zustand.min(1), 0.0)) };
+      };
 
-      // ---------- Rechenschritt 2: Form der Lichtflecken aus den Nachbarstrahlen ----------
+      // ---------- Baustein 2: Form der Lichtflecken aus den Nachbarstrahlen ----------
+      // lies.gerade(dx, dy), lies.land(dx, dy): Werte des Strahls, der im Raster um (dx, dy) daneben liegt (am Rand
+      // der Randstrahl selbst). Ergebnis je Fleck: A = x, z, halbe Kanten des Vierecks; B = Form und Stärke der Glocke
       const S_FLECK = this.uFleck, EPS = this.uEps, QUELLE = 0.5 * 0.012 / LICHT_ABSTAND, L_MAX = 0.005;
       const fleck = (du, dv, wegN, gewicht, zielA, zielB) => {
         const e2 = EPS.mul(EPS).add(wegN.mul(QUELLE).mul(wegN.mul(QUELLE)));
@@ -446,23 +460,19 @@ export class EchtzeitLicht {
         zielA.assign(vec4(a.sqrt().mul(3).min(0.03), c.sqrt().mul(3).min(0.03), 0, 0));
         zielB.assign(vec4(c.div(det), b.negate().div(det), a.div(det), amp));
       };
-      this.formen = Fn(() => {
-        const i = int(instanceIndex);
-        const iy = i.div(N), ix = i.sub(iy.mul(N));
-        const nachbar = (dx, dy) => ix.add(dx).clamp(0, N - 1).add(iy.add(dy).clamp(0, N - 1).mul(N));
+      const form = lies => {
         // Schatten: regelmäßiges Raster, mittige Differenzen
-        const g = bGerade.element(i).toVar();
-        const gu = bGerade.element(nachbar(1, 0)).xy.sub(bGerade.element(nachbar(-1, 0)).xy).mul(0.5).toVar();
-        const gv = bGerade.element(nachbar(0, 1)).xy.sub(bGerade.element(nachbar(0, -1)).xy).mul(0.5).toVar();
+        const g = lies.gerade(0, 0).toVar();
+        const gu = lies.gerade(1, 0).xy.sub(lies.gerade(-1, 0).xy).mul(0.5).toVar();
+        const gv = lies.gerade(0, 1).xy.sub(lies.gerade(0, -1).xy).mul(0.5).toVar();
         const sa = vec4(0).toVar(), sb = vec4(0).toVar();
         fleck(gu, gv, g.z, g.w.mul(this.uZelle), sa, sb);
-        sA.element(instanceIndex).assign(vec4(g.x, g.y, sa.x.mul(g.w), sa.y.mul(g.w)));
-        sB.element(instanceIndex).assign(sb);
+        const schattenA = vec4(g.x, g.y, sa.x.mul(g.w), sa.y.mul(g.w)).toVar();
         // Licht: je Richtung die kürzere der beiden einseitigen Differenzen (hält Sprünge scharf)
-        const l = bLand.element(i).toVar();
+        const l = lies.land(0, 0).toVar();
         const an = l.w.greaterThan(1.5);
         const seite = (dx, dy, ersatz) => {
-          const pa = bLand.element(nachbar(dx, dy)).toVar(), pb = bLand.element(nachbar(-dx, -dy)).toVar();
+          const pa = lies.land(dx, dy).toVar(), pb = lies.land(-dx, -dy).toVar();
           const da = pa.xy.sub(l.xy).toVar(), db = l.xy.sub(pb.xy).toVar();
           const la = select(pa.w.greaterThan(1.5), da.length(), 1e3).toVar(), lb = select(pb.w.greaterThan(1.5), db.length(), 1e3).toVar();
           const v = select(la.lessThan(lb), da, db).toVar(), lv = min(la, lb).toVar();
@@ -472,19 +482,18 @@ export class EchtzeitLicht {
         const ka = vec4(0).toVar(), kb = vec4(0).toVar();
         fleck(lu, lv, l.z, this.uZelle.mul(this.uStark), ka, kb);
         const ein = select(an, 1.0, 0.0);
-        kA.element(instanceIndex).assign(vec4(l.x, l.y, ka.x.mul(ein), ka.y.mul(ein)));
-        kB.element(instanceIndex).assign(kb);
-        kC.element(instanceIndex).assign(bFarbe.element(i));
-      })().compute(ANZ);
+        return { sA: schattenA, sB: sb, kA: vec4(l.x, l.y, ka.x.mul(ein), ka.y.mul(ein)), kB: kb };
+      };
 
-      const material = (A, B, C) => {
+      // ---------- Baustein 3: Flecken (instanzierte Vierecke, additiv in die Lichttextur) ----------
+      // a, b, c: Werte A, B und Farbe des Flecks mit der Instanznummer (im Eckpunkt-Shader); c = null: Schatten
+      const material = (a, b, c) => {
         const m = new THREE.NodeMaterial();
-        const a = A.toAttribute(), b = B.toAttribute();
         const versatz = positionGeometry.xy.mul(a.zw);
         m.vertexNode = vec4(a.xy.add(versatz).div(LICHT_BREITE / 2), 0, 1);
         const vV = varying(versatz), vB = varying(b);
         const glocke = vV.x.mul(vV.x).mul(vB.x).add(vV.x.mul(vV.y).mul(vB.y).mul(2)).add(vV.y.mul(vV.y).mul(vB.z)).mul(-0.5).exp().mul(vB.w);
-        m.fragmentNode = C ? vec4(varying(C.toAttribute().xyz).mul(glocke), 0) : vec4(0, 0, 0, glocke);
+        m.fragmentNode = c ? vec4(varying(c.xyz).mul(glocke), 0) : vec4(0, 0, 0, glocke);
         m.blending = THREE.CustomBlending;
         m.blendEquation = THREE.AddEquation;
         m.blendSrc = m.blendSrcAlpha = THREE.OneFactor;
@@ -494,8 +503,75 @@ export class EchtzeitLicht {
         m.side = THREE.DoubleSide;
         return m;
       };
+
+      let flecken;
+      if (!zeichnen) {
+        // ---------- Weg „rechenshader“ (WebGPU): Speicherpuffer, die Strahlnummer ist die Instanznummer ----------
+        const bLand = instancedArray(ANZ, 'vec4'), bFarbe = instancedArray(ANZ, 'vec4'), bGerade = instancedArray(ANZ, 'vec4');
+        const kA = instancedArray(ANZ, 'vec4'), kB = instancedArray(ANZ, 'vec4'), kC = instancedArray(ANZ, 'vec4');
+        const sA = instancedArray(ANZ, 'vec4'), sB = instancedArray(ANZ, 'vec4');
+        this.speicher = [bLand, bFarbe, bGerade, kA, kB, kC, sA, sB];
+        this.verfolgen = Fn(() => {
+          const i = int(instanceIndex);
+          const iy = i.div(N), ix = i.sub(iy.mul(N));
+          const e = spur(ix, iy);
+          bLand.element(instanceIndex).assign(e.land);
+          bFarbe.element(instanceIndex).assign(e.farbe);
+          bGerade.element(instanceIndex).assign(e.gerade);
+        })().compute(ANZ);
+        this.formen = Fn(() => {
+          const i = int(instanceIndex);
+          const iy = i.div(N), ix = i.sub(iy.mul(N));
+          const nachbar = (dx, dy) => dx === 0 && dy === 0 ? i : ix.add(dx).clamp(0, N - 1).add(iy.add(dy).clamp(0, N - 1).mul(N));
+          const e = form({ gerade: (dx, dy) => bGerade.element(nachbar(dx, dy)), land: (dx, dy) => bLand.element(nachbar(dx, dy)) });
+          sA.element(instanceIndex).assign(e.sA);
+          sB.element(instanceIndex).assign(e.sB);
+          kA.element(instanceIndex).assign(e.kA);
+          kB.element(instanceIndex).assign(e.kB);
+          kC.element(instanceIndex).assign(bFarbe.element(i));
+        })().compute(ANZ);
+        flecken = [material(kA.toAttribute(), kB.toAttribute(), kC.toAttribute()), material(sA.toAttribute(), sB.toAttribute(), null)];
+      } else {
+        // ---------- Weg „zeichnen“ (WebGL2): Zielflächen N × N, ein Bildpunkt je Strahl ----------
+        // 32-Bit-Gleitkomma wie die Speicherpuffer (die Fleckform hat Werte weit über dem Bereich von 16 Bit),
+        // ungefiltert; gelesen wird immer genau ein Bildpunkt (texelFetch).
+        const flaeche = anzahl => new THREE.RenderTarget(N, N, { count: anzahl, type: THREE.FloatType, format: THREE.RGBAFormat,
+          depthBuffer: false, samples: 0, generateMipmaps: false, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+        const zSpur = flaeche(3);        // land, farbe, gerade
+        const zForm = flaeche(4);        // sA, sB, kA, kB
+        this.flaechen = [zSpur, zForm];
+        const hol = (tex, jx, jy) => textureLoad(tex, ivec2(jx, jy));
+        // Ein Durchgang über die ganze Zielfläche; rechnung(ix, iy) liefert je Ziel einen vec4. Das erste Ziel trägt
+        // die Rechnung, die übrigen sind deren Nebenergebnisse (three.js baut die Ziele in ihrer Reihenfolge).
+        const durchgang = (anzahl, rechnung) => {
+          const weitere = Array.from({ length: anzahl - 1 }, () => property('vec4'));
+          const erstes = Fn(() => {
+            const werte = rechnung(int(screenCoordinate.x), int(screenCoordinate.y));
+            weitere.forEach((ziel, k) => ziel.assign(werte[k + 1]));
+            return werte[0];
+          })();
+          const m = new THREE.NodeMaterial();
+          m.fragmentNode = outputStruct(erstes, ...weitere);
+          m.blending = THREE.NoBlending;
+          m.depthTest = m.depthWrite = false;
+          return new THREE.QuadMesh(m);
+        };
+        this.verfolgen = durchgang(3, (ix, iy) => { const e = spur(ix, iy); return [e.land, e.farbe, e.gerade]; });
+        this.formen = durchgang(4, (ix, iy) => {
+          const nachbar = (tex, dx, dy) => hol(tex, ix.add(dx).clamp(0, N - 1), iy.add(dy).clamp(0, N - 1));
+          const e = form({ gerade: (dx, dy) => nachbar(zSpur.textures[2], dx, dy), land: (dx, dy) => nachbar(zSpur.textures[0], dx, dy) });
+          return [e.sA, e.sB, e.kA, e.kB];
+        });
+        this.verfolgen.ziel = zSpur;
+        this.formen.ziel = zForm;
+        // Die Flecken holen ihre Werte per Instanznummer aus den Zielflächen
+        const nr = () => { const i = int(instanceIndex), iy = i.div(N); return [i.sub(iy.mul(N)), iy]; };
+        const aus = tex => hol(tex, ...nr());
+        flecken = [material(aus(zForm.textures[2]), aus(zForm.textures[3]), aus(zSpur.textures[1])),
+          material(aus(zForm.textures[0]), aus(zForm.textures[1]), null)];
+      }
       this.szene = new THREE.Scene();
-      for (const m of [material(kA, kB, kC), material(sA, sB, null)]) {
+      for (const m of flecken) {
         const netz = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), m);
         netz.count = ANZ;
         netz.frustumCulled = false;
@@ -598,11 +674,15 @@ export class EchtzeitLicht {
   rechne() {
     if (this.ruhe > 24) return;
     const r = this.renderer;
-    r.compute(this.verfolgen);
-    r.compute(this.formen);
     const ziel = r.getRenderTarget(), alpha = r.getClearAlpha();
     r.getClearColor(this._farbe);
     r.setClearColor(0x000000, 0);
+    if (this.weg === 'zeichnen') {
+      for (const schritt of [this.verfolgen, this.formen]) { r.setRenderTarget(schritt.ziel); schritt.render(r); }
+    } else {
+      r.compute(this.verfolgen);
+      r.compute(this.formen);
+    }
     r.setRenderTarget(this.roh);
     r.render(this.szene, this.kamera);
     this.jetzt = 1 - this.jetzt;
@@ -616,20 +696,27 @@ export class EchtzeitLicht {
 
   /** Lichttextur auslesen (nur für Eichung und Sichtung): Float32Array RGBA, pixel². */
   async lies() {
-    const roh = await this.renderer.readRenderTargetPixelsAsync(this.verlauf[this.jetzt], 0, 0, this.pixel, this.pixel);
+    const roh = zeilenWieWebGPU(this.renderer,
+      await this.renderer.readRenderTargetPixelsAsync(this.verlauf[this.jetzt], 0, 0, this.pixel, this.pixel), this.pixel, this.pixel);
     if (roh instanceof Float32Array) return roh;
     const aus = new Float32Array(roh.length);
     for (let i = 0; i < roh.length; i++) aus[i] = THREE.DataUtils.fromHalfFloat(roh[i]);
     return aus;
   }
 
-  /** Gibt alles frei, was am Strahlenraster hängt: Flecken, Rechenschritte und die Speicher der Strahlen (beim
-   *  Wechsel auf das kleine Raster blieben sie sonst auf der Grafikkarte liegen). */
+  /** Gibt alles frei, was am Strahlenraster hängt: Flecken, Rechenschritte und die Speicher bzw. Zielflächen der
+   *  Strahlen (beim Wechsel auf das kleine Raster blieben sie sonst auf der Grafikkarte liegen). */
   raeume() {
     if (!this.szene) return;
     for (const netz of this.szene.children) { netz.geometry.dispose(); netz.material.dispose(); }
-    this.verfolgen.dispose();
-    this.formen.dispose();
+    if (this.weg === 'zeichnen') {
+      for (const schritt of [this.verfolgen, this.formen]) schritt.material.dispose();
+      for (const z of this.flaechen || []) z.dispose();
+      this.flaechen = [];
+    } else {
+      this.verfolgen.dispose();
+      this.formen.dispose();
+    }
     for (const knoten of this.speicher || []) {
       if (knoten.value && typeof knoten.value.dispose === 'function') knoten.value.dispose();
       if (typeof knoten.dispose === 'function') knoten.dispose();

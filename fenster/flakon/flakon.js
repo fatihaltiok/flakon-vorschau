@@ -248,6 +248,8 @@ export async function starte(canvas, optionen = {}) {
     zeigeFluessigkeit(an) { aussehen.glas.uFluessig.value = an ? 1 : 0; },
     zeigeEtikett(an) { etikettAn = !!an; aussehen.etikett.visible = etikettAn && flakonAn; aussehen.glas.uEtikett.value = an ? 1 : 0; },
     tellerLicht: () => lichtAn() ? 'echtzeit' : 'bilder',
+    // Weg des Lichts (§6.12): Rechenshader (WebGPU), Zeichendurchgänge (WebGL2) oder die LuxCore-Bilder
+    lichtWeg: () => lichtAn() ? aussehen.tuch.echt.weg : 'bilder',
     lichtBild: () => lichtAn() ? aussehen.tuch.echt.lies() : null,   // nur für Eichung und Sichtung
     unterlage: () => 'tuch',
     // Weltkoordinaten (das Tuch liegt fest, §6.11)
@@ -515,10 +517,14 @@ export async function starte(canvas, optionen = {}) {
     // Abstandsfeld als 16-Bit-Textur, wo 32-Bit nicht linear filterbar ist (Gegenprüfung T2n, Befund 4); ?feld16 erzwingt es
     const halb = params.has('feld16') || (webgpu ? !renderer.hasFeature('float32-filterable')
       : !renderer.backend.gl.getExtension('OES_texture_float_linear'));
-    // Echtzeit-Licht nur mit Rechenshadern (WebGPU); am Handy gleich in der kleinen Stufe
+    // Echtzeit-Licht (§6.12): unter WebGPU mit Rechenshadern, unter WebGL2 mit Zeichendurchgängen in Gleitkomma-Zielflächen
+    // — dort nur, wenn in solche Flächen gezeichnet und additiv gemischt werden kann; sonst und mit ?bilder die
+    // LuxCore-Bilder. Am Handy gleich in der kleinen Stufe.
+    const live = !params.has('bilder') && (webgpu || ['EXT_color_buffer_float', 'EXT_float_blend']
+      .every(name => renderer.backend.gl.getExtension(name) !== null));
     const handy = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 700;
     const aussehenNeu = await baueAussehen(gruppe, gltf, glasGltf, meta, szene, feldDaten, hdr,
-      { renderer, raster: webgpu && !params.has('bilder') ? (Number(params.get('raster')) || (handy ? 128 : 256)) : 0,
+      { renderer, raster: live ? (Number(params.get('raster')) || (handy ? 128 : 256)) : 0,
         pixel: Number(params.get('lichtpx')) || (handy ? 768 : 1024), halb, flach: params.has('flach') });
     // Während der Arbeiter die Tabelle rechnet: die Shader in Portionen vorbereiten (erst das Tellerlicht, dann die
     // Szene), damit das erste Bild die Seite nicht am Stück blockiert (Gegenprüfung T2n, Befund 3)

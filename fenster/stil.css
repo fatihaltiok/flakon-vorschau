@@ -47,6 +47,12 @@ body {
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
 }
+h1, h2, h3 {
+  font-family: var(--schrift-titel);
+  font-weight: 600;
+  line-height: 1.02;
+  margin: 0;
+}
 .media-ki {
   position: absolute;
   left: 10px;

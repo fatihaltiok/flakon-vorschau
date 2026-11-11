@@ -5,13 +5,13 @@
 // hier sind Weltkoordinaten (Ursprung Mitte der Standfläche in Ruhe, +Y oben).
 // Satin: dunkelbrauner Grund, darüber ein anisotroper Glanz (glatt entlang der Fäden, breit quer dazu) vom Hauptlicht
 // und von den Softboxen der Umgebung — er liegt als warmes Band auf den Faltenkämmen und steht still.
-// Licht: unter WebGPU die Echtzeit-Rechnung (Schatten, gebündeltes Licht, Einfallswinkel je Faltenflanke), sonst acht
+// Licht: die Echtzeit-Rechnung (Schatten, gebündeltes Licht, Einfallswinkel je Faltenflanke; WebGPU und WebGL2), sonst acht
 // LuxCore-Bilder der Bestrahlung auf dem Tuch (Flasche bei gier 0°, 45° … 315°, in Weltkoordinaten), zwischen zwei
 // Lagen nach gier überblendet.
 import * as THREE from 'three/webgpu';
 import { Fn, cameraPosition, float, max, mix, pmremTexture, positionLocal, smoothstep, step,
   texture, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
-import { EchtzeitLicht, LICHT_BREITE, Lichtlage } from './tellerlicht.js';
+import { EchtzeitLicht, LICHT_BREITE, Lichtlage, zeilenWieWebGPU } from './tellerlicht.js';
 
 const NETZ = 256;            // Zellen je Kante des gezeichneten Netzes über dem Höhenfeld
 const FERN = 1.6;            // halbe Kante der flachen Fortsetzung (läuft ins Dunkle aus)
@@ -50,7 +50,7 @@ export class Tuch {
 
     // ---------- Licht ----------
     this.lage = new Lichtlage();
-    this.echt = null;                 // Echtzeit-Licht (nur WebGPU), wird vor dem ersten Bild gesetzt
+    this.echt = null;                 // Echtzeit-Licht (WebGPU oder WebGL2, §6.12), wird vor dem ersten Bild gesetzt
     this.uEcht = uniform(0);
     this.bilder = bilder;
     this.a = texture(bilder[0]);
@@ -198,7 +198,7 @@ export class Tuch {
     return (an(i, j) * (1 - fu) + an(i + 1, j) * fu) * (1 - fv) + (an(i, j + 1) * (1 - fu) + an(i + 1, j + 1) * fu) * fv;
   }
 
-  /** Echtzeit-Licht einschalten (nur WebGPU): Strahlen durch den Flakon auf das Höhenfeld */
+  /** Echtzeit-Licht einschalten (WebGPU: Rechenshader, WebGL2: Zeichendurchgänge): Strahlen durch den Flakon auf das Höhenfeld */
   starteEchtzeit(renderer, glas, glasGeo, raster, pixel) {
     this.renderer = renderer;
     this.echt = new EchtzeitLicht(renderer, glas, glasGeo, this, this.lage, raster, pixel);
@@ -249,7 +249,8 @@ export class Tuch {
           k.quad.render(r);
           r.setRenderTarget(alt);
           r.toneMapping = ton;
-          const roh = await r.readRenderTargetPixelsAsync(k.ziel, 0, 0, px, px);
+          // unter WebGL kommen die Zeilen von unten nach oben (§6.12): in die Folge bringen, die unten gelesen wird
+          const roh = zeilenWieWebGPU(r, await r.readRenderTargetPixelsAsync(k.ziel, 0, 0, px, px), px, px);
           k.werte = roh; k.stand = stand; k.zeit = performance.now(); k.laeuft = null;
         })();
       }
