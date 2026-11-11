@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="de" class="js">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Flakon im Fenster – Prüfseite</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="stil.css">
+  <script type="importmap">{"imports":{"three":"./flakon/lib/three.webgpu.js","three/webgpu":"./flakon/lib/three.webgpu.js","three/tsl":"./flakon/lib/three.tsl.js","./flakon/lib/three.core.js":"../lib/three.core.js"}}</script>
+</head>
+<body>
+  <main>
+    <section class="flakon3d" id="flakon" aria-label="Der Flakon in 3D">
+      <h2>Der Flakon. Licht, das sich bricht.</h2>
+      <p class="flakon3d__text">Drehen oder kippen Sie den Flakon: Die Flüssigkeit schwappt, und das Licht fällt live durch
+        das dicke Glas auf das Satintuch. Ein 3D-Modell aus unserer Werkstatt, direkt im Browser.</p>
+      <div class="flakon3d__bogen">
+        <div class="flakon3d__fenster">
+          <canvas data-flakon3d tabindex="0" aria-label="Drehbarer und kippbarer 3D-Flakon: waagerecht ziehen zum Drehen, senkrecht zum Kippen"></canvas>
+          <img class="flakon3d__standbild" src="flakon/standbild.webp" width="1200" height="900" alt="Ein Parfümflakon aus dickem Glas mit bernsteinfarbener Flüssigkeit auf einem dunkelbraunen Satintuch" loading="lazy">
+          <p class="flakon3d__laden" role="status">Flakon wird geladen</p>
+          <p class="flakon3d__hinweis" hidden>Wischen: drehen · Ziehen: kippen</p>
+          <p class="flakon3d__ersatz" hidden>Ihr Browser kann die 3D-Ansicht nicht zeigen. Hier ist ein Bild des Flakons.</p>
+        </div>
+        <p class="media-ki" role="note">3D-Computeranimation, kein Verkaufsprodukt</p>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="flakon/flakon-fenster.js"></script>
+</body>
+</html>

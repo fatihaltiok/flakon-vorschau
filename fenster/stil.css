@@ -1,0 +1,202 @@
+/* Prüfseite: Auszug aus der Agentur-Webseite (Schriften, Grundregeln, Schild, Flakon-Fenster). */
+@font-face { font-family: "Big Shoulders Display"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url("assets/fonts/big-shoulders-display-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Big Shoulders Display"; font-style: normal; font-weight: 600; font-display: swap;
+  src: url("assets/fonts/big-shoulders-display-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Big Shoulders Display"; font-style: normal; font-weight: 700; font-display: swap;
+  src: url("assets/fonts/big-shoulders-display-latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "Schibsted Grotesk"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url("assets/fonts/schibsted-grotesk-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Schibsted Grotesk"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url("assets/fonts/schibsted-grotesk-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Schibsted Grotesk"; font-style: normal; font-weight: 600; font-display: swap;
+  src: url("assets/fonts/schibsted-grotesk-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Schibsted Grotesk"; font-style: italic; font-weight: 400; font-display: swap;
+  src: url("assets/fonts/schibsted-grotesk-latin-400-italic.woff2") format("woff2"); }
+:root {
+  --saal: #170C12;
+  --samt: #3B1224;
+  --leinwand: #E9E4DA;
+  --lampe: #F2B84B;
+  --nebel: #9A8A92;
+  --tinte: #1C1418;
+  /* Nebentext auf hellem Grund — in der Familie aus Nebel und Tinte gemischt (7,3:1 auf Leinwand) */
+  --tinte-weich: #54434B;
+  --linie-auf-hell: rgba(28, 20, 24, 0.18);
+  --linie-auf-dunkel: rgba(233, 228, 218, 0.16);
+
+  /* Der Saallicht-Zustand der ganzen Seite: startet dunkel, wird beim Scrollen hell
+     und am Ende wieder dunkel. main.js steuert --grund über ScrollTrigger. */
+  --grund: var(--saal);
+
+  --schrift-titel: "Big Shoulders Display", "Arial Narrow", sans-serif;
+  --schrift-text: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --rand: clamp(1.25rem, 4.5vw, 4.5rem);
+}
+* { box-sizing: border-box; }
+html {
+  background: var(--saal);
+  scroll-behavior: smooth;
+  overflow-x: clip;
+}
+body {
+  margin: 0;
+  background: var(--grund);
+  color: var(--tinte);
+  font: 400 17.5px/1.6 var(--schrift-text);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+.media-ki {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  z-index: 3;
+  margin: 0;
+  padding: 4px 8px;
+  border-radius: 3px;
+  /* Helles Schild mit dunkler Schrift: über dunklem Filmbild lesbar, und die
+     Schrift bleibt ≥ 4,5:1, selbst wenn die Kopfleiste kurz darüber liegt (Befund 1). */
+  background: rgba(233, 228, 218, 0.9);
+  box-shadow: 0 0 0 1px rgba(23, 12, 18, 0.18);
+  color: var(--tinte);
+  font: 500 0.75rem/1.2 var(--schrift-text);
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+/* ---------- Flakon in 3D (E-036): Fenster mit Rahmen direkt nach der Uhr ----------
+   Aufbau wie die Uhr; innen dunkler Grund #0d0a09 (der Flakon zeichnet seinen
+   eigenen Hintergrund), Standbild füllt das Fenster (object-fit: cover). */
+
+.flakon3d {
+  padding: clamp(5rem, 11vh, 8.5rem) var(--rand);
+}
+.flakon3d h2 {
+  font-size: clamp(2.9rem, 6vw, 5.4rem);
+  color: var(--leinwand);
+  max-width: 14ch;
+}
+.flakon3d__text {
+  margin-top: 1.3rem;
+  max-width: 38rem;
+  color: rgba(233, 228, 218, 0.9);
+}
+
+.flakon3d__bogen {
+  position: relative;
+  margin-top: clamp(1.5rem, 3.5vh, 2.4rem);
+  /* Rechner 16:10, so breit wie die Inhaltsspalte (68rem wie „Zeitsprung“);
+     Breite höchstens 80vh × 16/10 = 128vh, damit die Höhe bei rund 80 % bleibt. */
+  max-width: min(68rem, 128vh);
+}
+
+.flakon3d__fenster {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  border: 1px solid rgba(242, 184, 75, 0.35); /* var(--lampe) mit rund 35 % Deckkraft */
+  border-radius: 6px;
+  background: #0d0a09;
+}
+
+/* Kein touch-action hier: das Modul setzt es selbst auf die Zeichenfläche. */
+.flakon3d__fenster canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.flakon3d__fenster canvas:focus-visible {
+  outline: 2px solid var(--lampe);
+  outline-offset: -5px;
+}
+.flakon3d__fenster canvas[hidden] { display: none; }
+
+/* Rückfallbild: sichtbar, solange die 3D-Ansicht nicht läuft; füllt das Fenster. */
+.flakon3d__standbild {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.flakon3d__standbild[hidden] { display: none; }
+
+/* Ladehinweis und Bedienhinweis: unten mittig im Fenster, klein, über dem Bild. */
+.flakon3d__laden,
+.flakon3d__hinweis {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: 1.1rem;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(233, 228, 218, 0.9);
+  font-size: 1rem;
+  color: var(--tinte);
+  text-align: center;
+  pointer-events: none;
+}
+.flakon3d__laden[hidden] { display: none; }
+.flakon3d__hinweis {
+  max-width: calc(100% - 2.4rem);
+  transition: opacity 0.7s;
+}
+.flakon3d__hinweis[hidden] { display: none; }
+.flakon3d__hinweis.benutzt { opacity: 0; }
+
+/* Rückfallsatz: über dem Standbild, unten mittig. */
+.flakon3d__ersatz {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: 1.4rem;
+  transform: translateX(-50%);
+  max-width: calc(100% - 2.4rem);
+  margin: 0;
+  padding: 0.6rem 1rem;
+  border-radius: 6px;
+  background: rgba(233, 228, 218, 0.9);
+  color: var(--tinte);
+  font-size: 1rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* Ohne JavaScript: Standbild mit dem Satz aus §3, kein Ladehinweis, keine Bedienung
+   (html.js setzt main.js; die Autorenregel überstimmt das hidden-Attribut). */
+/* Mit left: 50% dürfte der Text sonst nur die halbe Fensterbreite nutzen und bräche zu früh um. */
+.flakon3d__laden, .flakon3d__hinweis, .flakon3d__ersatz { width: max-content; max-width: calc(100% - 2.4rem); }
+html:not(.js) .flakon3d__laden { display: none; }
+html:not(.js) .flakon3d__hinweis { display: none; }
+html:not(.js) .flakon3d__ersatz { display: block; }
+html:not(.js) .flakon3d h2 { color: var(--tinte); }
+html:not(.js) .flakon3d__text { color: var(--tinte); }
+
+/* Schild unter dem Fenster (Vertrag §3). */
+.flakon3d__bogen .media-ki {
+  position: static;
+  display: inline-block;
+  margin-top: 0.7rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flakon3d__hinweis { transition: none; }
+}
+
+@media (max-width: 760px) {
+  /* Handy: volle Breite im Format 4:5, Breite höchstens 56vh (× 1,25 = 70 vh),
+     damit die Höhe bei höchstens 70 % der Bildschirmhöhe bleibt. */
+  .flakon3d { padding: 4.5rem var(--rand) 4rem; }
+  .flakon3d__bogen { max-width: min(100%, 56vh); }
+  .flakon3d__fenster { aspect-ratio: 4 / 5; }
+}
+
+/* ---------- Referenz: Sofa & Co. ---------- */

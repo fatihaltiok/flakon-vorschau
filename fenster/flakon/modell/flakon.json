@@ -1,0 +1,34 @@
+{
+  "einheit": "Meter",
+  "achsen": "+Y oben; x_web = x_blender, y_web = z_blender, z_web = -y_blender; Ursprung Mitte Flaschenboden",
+  "glb": "flakon.glb",
+  "teile": [
+    "Glas",
+    "Verschluss",
+    "Etikett",
+    "Drehteller"
+  ],
+  "hoehlung": {
+    "sdf": "hoehlung_sdf.bin",
+    "format": "Float32 little-endian, x läuft am schnellsten, dann y, dann z; negativ in der Höhlung, Meter",
+    "anzahl": [
+      85,
+      115,
+      85
+    ],
+    "ursprung": [
+      -0.042,
+      0.012,
+      -0.042
+    ],
+    "schritt": 0.001,
+    "decke_y": 0.12
+  },
+  "fuellung": {
+    "boden_innen_y": 0.018,
+    "spiegel_y": 0.067,
+    "fuellhoehe_h": 0.049,
+    "volumen_m3": 7.836876752649624e-05,
+    "innenradius_mittel_R": 0.025953
+  }
+}
